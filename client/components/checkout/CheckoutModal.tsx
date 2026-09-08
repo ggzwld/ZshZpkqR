@@ -194,57 +194,65 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     await loadFlutterwaveCheckout();
     if (!window.FlutterwaveCheckout) throw new Error("Secure checkout is unavailable.");
 
-    let checkout: { close: () => void } | undefined;
-    checkout = window.FlutterwaveCheckout({
-      public_key: paymentSession.publicKey,
-      tx_ref: paymentSession.txRef,
-      amount: paymentSession.amount,
-      currency: paymentSession.currency,
-      payment_options: paymentSession.paymentOptions,
-      customer: {
-        email: paymentSession.customer.email,
-        name: paymentSession.customer.name,
-        phone_number: paymentSession.customer.phoneNumber,
-      },
-      customizations: {
-        title: "Sheraton Special",
-        description: `Order ${paymentSession.txRef}`,
-      },
-      callback: async (payment) => {
-        try {
-          const verificationResponse = await fetch("/api/payments/flutterwave/verify", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${session.access_token}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              transactionId: payment.transaction_id,
-              txRef: payment.tx_ref,
-            }),
-          });
-          const verification = await verificationResponse.json();
-          if (!verificationResponse.ok || verification.paymentStatus !== "paid") {
-            throw new Error(verification.error || "Payment was not completed.");
-          }
+    await new Promise<void>((resolve, reject) => {
+      let completed = false;
+      let checkout: { close: () => void } | undefined;
 
-          checkout?.close();
-          setOrderNumber(verification.orderNumber);
-          setOrderConfirmed(true);
-          setPendingPaymentOrder(null);
-          setStep("confirmation");
-        } catch (error) {
-          setCheckoutError(error instanceof Error ? error.message : "We could not verify your payment.");
-        } finally {
-          setIsProcessing(false);
-        }
-      },
-      onclose: (incomplete) => {
-        if (incomplete) {
-          setCheckoutError("Payment was not completed. You can try again when ready.");
-          setIsProcessing(false);
-        }
-      },
+      const finish = (error?: Error) => {
+        if (completed) return;
+        completed = true;
+        if (error) reject(error);
+        else resolve();
+      };
+
+      checkout = window.FlutterwaveCheckout({
+        public_key: paymentSession.publicKey,
+        tx_ref: paymentSession.txRef,
+        amount: paymentSession.amount,
+        currency: paymentSession.currency,
+        payment_options: paymentSession.paymentOptions,
+        customer: {
+          email: paymentSession.customer.email,
+          name: paymentSession.customer.name,
+          phone_number: paymentSession.customer.phoneNumber,
+        },
+        meta: { order_id: paymentSession.orderId },
+        customizations: {
+          title: "Sheraton Special",
+          description: `Order ${paymentSession.txRef}`,
+        },
+        callback: async (payment) => {
+          try {
+            const verificationResponse = await fetch("/api/payments/flutterwave/verify", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${session.access_token}`,
+                "content-type": "application/json",
+              },
+              body: JSON.stringify({
+                transactionId: payment.transaction_id,
+                txRef: payment.tx_ref,
+              }),
+            });
+            const verification = await verificationResponse.json();
+            if (!verificationResponse.ok || verification.paymentStatus !== "paid") {
+              throw new Error(verification.error || "Payment was not completed.");
+            }
+
+            setOrderNumber(verification.orderNumber);
+            setOrderConfirmed(true);
+            setPendingPaymentOrder(null);
+            setStep("confirmation");
+            finish();
+            checkout?.close();
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error("We could not verify your payment."));
+          }
+        },
+        onclose: () => {
+          finish(new Error("Payment was not completed. You can try again when ready."));
+        },
+      });
     });
   };
 
@@ -708,7 +716,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
             Secure card checkout
           </div>
           <p className="mt-2 text-sm text-gray-600">
-            Your card details are entered only in the secure payment window and are never handled by Sheraton Special.
+            A secure checkout opens over this page. Your card details go directly to Flutterwave and are never handled by Sheraton Special.
           </p>
         </div>
       )}
@@ -730,7 +738,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       {paymentMethod === "mobile-money" && (
         <div className="rounded-lg bg-purple-50 p-4">
           <p className="text-sm text-purple-700">
-            Continue to the secure payment window to authorise Mobile Money with the phone number in your order details.
+            A secure checkout opens over this page to approve Mobile Money using the phone number in your order details.
           </p>
         </div>
       )}
