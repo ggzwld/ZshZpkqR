@@ -46,6 +46,7 @@ import {
   X,
   ShoppingCart,
 } from "lucide-react";
+import { loadFlutterwaveCheckout } from "../../lib/flutterwave";
 import { supabase } from "../../lib/supabase";
 
 interface MenuItem {
@@ -91,13 +92,10 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [paymentMethod, setPaymentMethod] = useState<
     "card" | "room-charge" | "cash" | "mobile-money"
   >("card");
-  const [paymentDetails, setPaymentDetails] = useState({
-    cardNumber: "",
-    expiryDate: "",
-    cvv: "",
-    cardName: "",
-    mobileMoneyNumber: "",
-  });
+  const [pendingPaymentOrder, setPendingPaymentOrder] = useState<{
+    id: string;
+    orderNumber: string;
+  } | null>(null);
   const [loyaltyPoints, setLoyaltyPoints] = useState(1250);
   const [usePoints, setUsePoints] = useState(false);
   const [tipAmount, setTipAmount] = useState<number>(0);
@@ -178,76 +176,151 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     setTipPercentage(percentage);
   };
 
+  const startOnlinePayment = async (order: { id: string; orderNumber: string }) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error("Please sign in before paying.");
+
+    const sessionResponse = await fetch("/api/payments/flutterwave/inline-session", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ orderId: order.id }),
+    });
+    const paymentSession = await sessionResponse.json();
+    if (!sessionResponse.ok) throw new Error(paymentSession.error || "Unable to prepare secure checkout.");
+
+    await loadFlutterwaveCheckout();
+    if (!window.FlutterwaveCheckout) throw new Error("Secure checkout is unavailable.");
+
+    let checkout: { close: () => void } | undefined;
+    checkout = window.FlutterwaveCheckout({
+      public_key: paymentSession.publicKey,
+      tx_ref: paymentSession.txRef,
+      amount: paymentSession.amount,
+      currency: paymentSession.currency,
+      payment_options: paymentSession.paymentOptions,
+      customer: {
+        email: paymentSession.customer.email,
+        name: paymentSession.customer.name,
+        phone_number: paymentSession.customer.phoneNumber,
+      },
+      customizations: {
+        title: "Sheraton Special",
+        description: `Order ${paymentSession.txRef}`,
+      },
+      callback: async (payment) => {
+        try {
+          const verificationResponse = await fetch("/api/payments/flutterwave/verify", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${session.access_token}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              transactionId: payment.transaction_id,
+              txRef: payment.tx_ref,
+            }),
+          });
+          const verification = await verificationResponse.json();
+          if (!verificationResponse.ok || verification.paymentStatus !== "paid") {
+            throw new Error(verification.error || "Payment was not completed.");
+          }
+
+          checkout?.close();
+          setOrderNumber(verification.orderNumber);
+          setOrderConfirmed(true);
+          setPendingPaymentOrder(null);
+          setStep("confirmation");
+        } catch (error) {
+          setCheckoutError(error instanceof Error ? error.message : "We could not verify your payment.");
+        } finally {
+          setIsProcessing(false);
+        }
+      },
+      onclose: (incomplete) => {
+        if (incomplete) {
+          setCheckoutError("Payment was not completed. You can try again when ready.");
+          setIsProcessing(false);
+        }
+      },
+    });
+  };
+
   const handlePlaceOrder = async () => {
     setIsProcessing(true);
     setCheckoutError("");
 
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) {
-      setCheckoutError("Please sign in before placing an order.");
+    try {
+      if (pendingPaymentOrder) {
+        await startOnlinePayment(pendingPaymentOrder);
+        return;
+      }
+
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) throw new Error("Please sign in before placing an order.");
+
+      const orderNumberValue = `SH${Date.now().toString().slice(-8)}`;
+      const { data: order, error: orderError } = await supabase
+        .from("menu_orders")
+        .insert({
+          order_number: orderNumberValue,
+          user_id: user.id,
+          order_type: orderType,
+          status: "pending",
+          payment_method: paymentMethod,
+          payment_status: "pending",
+          first_name: customerInfo.firstName.trim(),
+          last_name: customerInfo.lastName.trim(),
+          email: customerInfo.email.trim(),
+          phone: customerInfo.phone.trim(),
+          room_number: customerInfo.roomNumber.trim() || null,
+          delivery_address: customerInfo.deliveryAddress.trim() || null,
+          special_requests: customerInfo.specialRequests.trim() || null,
+          subtotal: getSubtotal(),
+          tax_amount: getTax(),
+          service_fee: getServiceFee(),
+          tip_amount: tipAmount,
+          points_discount: getPointsDiscount(),
+          total_amount: getFinalTotal(),
+        })
+        .select("id, order_number")
+        .single();
+
+      if (orderError || !order) throw new Error("We could not place your order. Please try again.");
+
+      const { error: itemsError } = await supabase.from("menu_order_items").insert(
+        getCartItems()
+          .filter(({ item }) => item)
+          .map(({ item, quantity }) => ({
+            order_id: order.id,
+            menu_item_id: item!.id,
+            item_name: item!.name,
+            unit_price: item!.price,
+            quantity,
+            line_total: item!.price * quantity,
+          })),
+      );
+
+      if (itemsError) throw new Error("We could not save the order items. Please try again.");
+
+      const paymentOrder = { id: order.id, orderNumber: order.order_number };
+      if (paymentMethod === "card" || paymentMethod === "mobile-money") {
+        setPendingPaymentOrder(paymentOrder);
+        await startOnlinePayment(paymentOrder);
+        return;
+      }
+
+      setOrderNumber(order.order_number);
+      setOrderConfirmed(true);
+      setStep("confirmation");
+    } catch (error) {
+      console.error("Unable to process menu order", error);
+      setCheckoutError(error instanceof Error ? error.message : "We could not process your order.");
+    } finally {
       setIsProcessing(false);
-      return;
     }
-
-    const orderNumberValue = `SH${Date.now().toString().slice(-8)}`;
-    const { data: order, error: orderError } = await supabase
-      .from("menu_orders")
-      .insert({
-        order_number: orderNumberValue,
-        user_id: user.id,
-        order_type: orderType,
-        status: "pending",
-        payment_method: paymentMethod,
-        payment_status: "pending",
-        first_name: customerInfo.firstName.trim(),
-        last_name: customerInfo.lastName.trim(),
-        email: customerInfo.email.trim(),
-        phone: customerInfo.phone.trim(),
-        room_number: customerInfo.roomNumber.trim() || null,
-        delivery_address: customerInfo.deliveryAddress.trim() || null,
-        special_requests: customerInfo.specialRequests.trim() || null,
-        subtotal: getSubtotal(),
-        tax_amount: getTax(),
-        service_fee: getServiceFee(),
-        tip_amount: tipAmount,
-        points_discount: getPointsDiscount(),
-        total_amount: getFinalTotal(),
-      })
-      .select("id, order_number")
-      .single();
-
-    if (orderError || !order) {
-      console.error("Unable to create menu order", orderError);
-      setCheckoutError("We could not place your order. Please try again.");
-      setIsProcessing(false);
-      return;
-    }
-
-    const { error: itemsError } = await supabase.from("menu_order_items").insert(
-      getCartItems()
-        .filter(({ item }) => item)
-        .map(({ item, quantity }) => ({
-          order_id: order.id,
-          menu_item_id: item!.id,
-          item_name: item!.name,
-          unit_price: item!.price,
-          quantity,
-          line_total: item!.price * quantity,
-        })),
-    );
-
-    if (itemsError) {
-      console.error("Unable to save menu order items", itemsError);
-      await supabase.from("menu_orders").delete().eq("id", order.id);
-      setCheckoutError("We could not save the order items. Please try again.");
-      setIsProcessing(false);
-      return;
-    }
-
-    setOrderNumber(order.order_number);
-    setOrderConfirmed(true);
-    setIsProcessing(false);
-    setStep("confirmation");
   };
 
   const resetModal = () => {
@@ -265,13 +338,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       deliveryAddress: "",
       specialRequests: "",
     });
-    setPaymentDetails({
-      cardNumber: "",
-      expiryDate: "",
-      cvv: "",
-      cardName: "",
-      mobileMoneyNumber: "",
-    });
+    setPendingPaymentOrder(null);
     setUsePoints(false);
     setTipAmount(0);
     setTipPercentage(18);
@@ -634,70 +701,15 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
         </div>
       </div>
 
-      {/* Payment Details */}
       {paymentMethod === "card" && (
-        <div className="space-y-4 p-4 bg-gray-50 rounded-lg">
-          <div>
-            <label className="block text-sm font-medium mb-2">
-              Cardholder Name
-            </label>
-            <Input
-              value={paymentDetails.cardName}
-              onChange={(e) =>
-                setPaymentDetails((prev) => ({
-                  ...prev,
-                  cardName: e.target.value,
-                }))
-              }
-              placeholder="Name on card"
-            />
+        <div className="rounded-lg bg-gray-50 p-4">
+          <div className="flex items-center gap-2 text-sm font-medium text-sheraton-navy">
+            <Shield className="h-4 w-4 text-sheraton-gold" />
+            Secure card checkout
           </div>
-          <div>
-            <label className="block text-sm font-medium mb-2">Card Number</label>
-            <Input
-              value={paymentDetails.cardNumber}
-              onChange={(e) =>
-                setPaymentDetails((prev) => ({
-                  ...prev,
-                  cardNumber: e.target.value,
-                }))
-              }
-              placeholder="1234 5678 9012 3456"
-              maxLength={19}
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-2">
-                Expiry Date
-              </label>
-              <Input
-                value={paymentDetails.expiryDate}
-                onChange={(e) =>
-                  setPaymentDetails((prev) => ({
-                    ...prev,
-                    expiryDate: e.target.value,
-                  }))
-                }
-                placeholder="MM/YY"
-                maxLength={5}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-2">CVV</label>
-              <Input
-                value={paymentDetails.cvv}
-                onChange={(e) =>
-                  setPaymentDetails((prev) => ({
-                    ...prev,
-                    cvv: e.target.value,
-                  }))
-                }
-                placeholder="123"
-                maxLength={3}
-              />
-            </div>
-          </div>
+          <p className="mt-2 text-sm text-gray-600">
+            Your card details are entered only in the secure payment window and are never handled by Sheraton Special.
+          </p>
         </div>
       )}
 
@@ -716,17 +728,10 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       )}
 
       {paymentMethod === "mobile-money" && (
-        <div className="space-y-3 rounded-lg bg-purple-50 p-4">
-          <label className="block text-sm font-medium">Mobile Money Number</label>
-          <Input
-            type="tel"
-            inputMode="tel"
-            value={paymentDetails.mobileMoneyNumber}
-            onChange={(e) => setPaymentDetails((prev) => ({ ...prev, mobileMoneyNumber: e.target.value }))}
-            placeholder="Enter mobile money number"
-            autoComplete="tel"
-          />
-          <p className="text-sm text-purple-700">You will receive a secure payment prompt from your mobile money provider.</p>
+        <div className="rounded-lg bg-purple-50 p-4">
+          <p className="text-sm text-purple-700">
+            Continue to the secure payment window to authorise Mobile Money with the phone number in your order details.
+          </p>
         </div>
       )}
 
@@ -793,14 +798,14 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
         </Button>
         <Button
           onClick={handlePlaceOrder}
-          disabled={isProcessing || (paymentMethod === "mobile-money" && !paymentDetails.mobileMoneyNumber.trim())}
+          disabled={isProcessing}
           className="flex-1 bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy"
         >
           {isProcessing ? (
             "Processing..."
           ) : (
             <>
-              Place Order ${getFinalTotal().toFixed(2)}
+              {paymentMethod === "card" || paymentMethod === "mobile-money" ? "Pay securely" : "Place Order"} ${getFinalTotal().toFixed(2)}
               <Receipt className="h-4 w-4 ml-2" />
             </>
           )}
@@ -837,7 +842,9 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
             <div className="font-medium">{estimatedTime}</div>
           </div>
           <div>
-            <div className="text-gray-600">Total Paid</div>
+            <div className="text-gray-600">
+              {paymentMethod === "card" || paymentMethod === "mobile-money" ? "Payment received" : "Amount due"}
+            </div>
             <div className="font-medium">${getFinalTotal().toFixed(2)}</div>
           </div>
         </div>

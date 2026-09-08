@@ -2,18 +2,56 @@ import type { RequestHandler } from "express";
 
 const flutterwaveBaseUrl = "https://api.flutterwave.com/v3";
 
+type MenuOrder = {
+  id: string;
+  order_number: string;
+  payment_method: string;
+  payment_status: string;
+  payment_reference: string | null;
+  total_amount: number | string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  phone: string;
+};
+
+type FlutterwaveTransaction = {
+  id: number | string;
+  tx_ref: string;
+  status: string;
+  amount: number | string;
+  currency: string;
+};
+
 const getConfiguration = () => {
   const secretKey = process.env.FLUTTERWAVE_SECRET_KEY;
+  const publicKey = process.env.FLUTTERWAVE_PUBLIC_KEY;
+  const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
   const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const redirectUrl = process.env.FLUTTERWAVE_REDIRECT_URL;
+  const currency = process.env.FLUTTERWAVE_CURRENCY || "USD";
 
-  if (!secretKey || !supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey || !redirectUrl) {
+  if (
+    !secretKey ||
+    !publicKey ||
+    !secretHash ||
+    !supabaseUrl ||
+    !supabaseAnonKey ||
+    !supabaseServiceRoleKey
+  ) {
     throw new Error("Flutterwave payment configuration is incomplete");
   }
 
-  return { secretKey, supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey, redirectUrl };
+  return {
+    secretKey,
+    publicKey,
+    secretHash,
+    supabaseUrl,
+    supabaseAnonKey,
+    supabaseServiceRoleKey,
+    currency,
+  };
 };
 
 const getAuthenticatedOrder = async (orderId: string, authorization?: string) => {
@@ -34,20 +72,39 @@ const getAuthenticatedOrder = async (orderId: string, authorization?: string) =>
 
   if (!response.ok) throw new Error("Unable to retrieve this order");
 
-  const [order] = await response.json();
+  const [order] = (await response.json()) as MenuOrder[];
   if (!order) throw new Error("Order not found");
   return order;
 };
 
-const updateOrder = async (orderId: string, authorization: string, values: Record<string, unknown>) => {
-  const { supabaseUrl, supabaseAnonKey } = getConfiguration();
+const getOrderByPaymentReference = async (paymentReference: string) => {
+  const { supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = getConfiguration();
+  const response = await fetch(
+    `${supabaseUrl}/rest/v1/menu_orders?payment_reference=eq.${encodeURIComponent(paymentReference)}&select=*`,
+    {
+      headers: {
+        apikey: supabaseAnonKey,
+        Authorization: `Bearer ${supabaseServiceRoleKey}`,
+      },
+    },
+  );
+
+  if (!response.ok) throw new Error("Unable to retrieve payment order");
+
+  const [order] = (await response.json()) as MenuOrder[];
+  if (!order) throw new Error("Payment order not found");
+  return order;
+};
+
+const updateOrderAsService = async (orderId: string, values: Record<string, unknown>) => {
+  const { supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = getConfiguration();
   const response = await fetch(
     `${supabaseUrl}/rest/v1/menu_orders?id=eq.${encodeURIComponent(orderId)}`,
     {
       method: "PATCH",
       headers: {
         apikey: supabaseAnonKey,
-        authorization,
+        Authorization: `Bearer ${supabaseServiceRoleKey}`,
         "content-type": "application/json",
         prefer: "return=minimal",
       },
@@ -55,96 +112,150 @@ const updateOrder = async (orderId: string, authorization: string, values: Recor
     },
   );
 
-  if (!response.ok) throw new Error("Unable to update this order");
+  if (!response.ok) throw new Error("Unable to update payment order");
 };
 
-export const initiateFlutterwavePayment: RequestHandler = async (req, res) => {
+const getPaymentOptions = (paymentMethod: string, currency: string) => {
+  if (paymentMethod !== "mobile-money") return "card";
+  if (currency !== "UGX") {
+    throw new Error("Mobile Money is available only when checkout prices are configured in UGX.");
+  }
+  return "mobilemoneyuganda";
+};
+
+const verifyTransaction = async (transactionId: string) => {
+  const { secretKey } = getConfiguration();
+  const response = await fetch(
+    `${flutterwaveBaseUrl}/transactions/${encodeURIComponent(transactionId)}/verify`,
+    { headers: { Authorization: `Bearer ${secretKey}` } },
+  );
+  const payload = await response.json();
+
+  if (!response.ok || payload.status !== "success" || !payload.data) {
+    throw new Error("Payment could not be verified");
+  }
+
+  return payload.data as FlutterwaveTransaction;
+};
+
+const confirmPayment = async (transactionId: string, transactionReference: string) => {
+  const [transaction, order] = await Promise.all([
+    verifyTransaction(transactionId),
+    getOrderByPaymentReference(transactionReference),
+  ]);
+  const { currency } = getConfiguration();
+
+  if (
+    transaction.tx_ref !== transactionReference ||
+    Number(transaction.amount) !== Number(order.total_amount) ||
+    transaction.currency !== currency
+  ) {
+    throw new Error("Payment verification data does not match the order");
+  }
+
+  if (order.payment_status === "paid") return { order, paymentStatus: "paid" as const };
+
+  const paymentStatus = transaction.status === "successful" ? "paid" : "failed";
+  await updateOrderAsService(order.id, {
+    status: paymentStatus === "paid" ? "confirmed" : "pending",
+    payment_status: paymentStatus,
+    flutterwave_transaction_id: String(transaction.id),
+  });
+
+  return { order, paymentStatus };
+};
+
+export const createFlutterwaveInlineSession: RequestHandler = async (req, res) => {
   try {
     const { orderId } = req.body as { orderId?: string };
     if (!orderId) return res.status(400).json({ error: "Order ID is required" });
 
-    const authorization = req.headers.authorization;
-    const order = await getAuthenticatedOrder(orderId, authorization);
-    const { secretKey, redirectUrl } = getConfiguration();
-    const transactionReference = `sheraton-${order.order_number}-${Date.now()}`;
-    const paymentOptions = order.payment_method === "mobile-money" ? "mobilemoney" : "card";
-
-    const flutterwaveResponse = await fetch(`${flutterwaveBaseUrl}/payments`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${secretKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        tx_ref: transactionReference,
-        amount: String(order.total_amount),
-        currency: "UGX",
-        redirect_url: redirectUrl,
-        payment_options: paymentOptions,
-        customer: {
-          email: order.email,
-          name: `${order.first_name} ${order.last_name}`.trim(),
-          phonenumber: order.phone,
-        },
-        meta: { order_id: order.id },
-        customizations: { title: "Sheraton Special" },
-      }),
-    });
-
-    const payload = await flutterwaveResponse.json();
-    if (!flutterwaveResponse.ok || payload.status !== "success" || !payload.data?.link) {
-      console.error("Flutterwave initiation failed", payload);
-      return res.status(502).json({ error: "Unable to start payment" });
+    const order = await getAuthenticatedOrder(orderId, req.headers.authorization);
+    if (order.payment_status === "paid") {
+      return res.status(409).json({ error: "This order has already been paid" });
     }
 
-    await updateOrder(order.id, authorization!, {
-      payment_reference: transactionReference,
+    const { publicKey, currency } = getConfiguration();
+    const amount = Number(order.total_amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: "Order total is invalid" });
+    }
+
+    const txRef = `sheraton-${order.order_number}-${crypto.randomUUID()}`;
+    await updateOrderAsService(order.id, {
+      payment_reference: txRef,
       payment_status: "pending",
     });
 
-    return res.json({ paymentLink: payload.data.link });
+    return res.json({
+      publicKey,
+      txRef,
+      amount,
+      currency,
+      paymentOptions: getPaymentOptions(order.payment_method, currency),
+      customer: {
+        email: order.email,
+        name: `${order.first_name} ${order.last_name}`.trim(),
+        phoneNumber: order.phone,
+      },
+    });
   } catch (error) {
-    console.error("Flutterwave payment initiation error", error);
-    return res.status(400).json({ error: error instanceof Error ? error.message : "Unable to start payment" });
+    console.error("Flutterwave Inline session error", error);
+    return res.status(400).json({
+      error: error instanceof Error ? error.message : "Unable to prepare payment",
+    });
   }
 };
 
 export const verifyFlutterwavePayment: RequestHandler = async (req, res) => {
   try {
-    const transactionId = String(req.query.transaction_id || "");
-    const orderId = String(req.query.order_id || "");
-    if (!transactionId || !orderId) return res.status(400).send("Invalid payment callback");
-
-    const { secretKey } = getConfiguration();
-    const verificationResponse = await fetch(`${flutterwaveBaseUrl}/transactions/${encodeURIComponent(transactionId)}/verify`, {
-      headers: { Authorization: `Bearer ${secretKey}` },
-    });
-    const verification = await verificationResponse.json();
-    const transaction = verification.data;
-
-    if (!verificationResponse.ok || verification.status !== "success" || transaction?.meta?.order_id !== orderId) {
-      return res.status(400).send("Payment could not be verified");
+    const { transactionId, txRef } = req.body as {
+      transactionId?: string | number;
+      txRef?: string;
+    };
+    if (!transactionId || !txRef) {
+      return res.status(400).json({ error: "Payment verification details are required" });
     }
 
-    const { supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = getConfiguration();
-    const paymentStatus = transaction.status === "successful" ? "paid" : "failed";
-    await fetch(`${supabaseUrl}/rest/v1/menu_orders?id=eq.${encodeURIComponent(orderId)}`, {
-      method: "PATCH",
-      headers: {
-        apikey: supabaseAnonKey,
-        Authorization: `Bearer ${supabaseServiceRoleKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        status: transaction.status === "successful" ? "confirmed" : "pending",
-        payment_status: paymentStatus,
-        flutterwave_transaction_id: String(transaction.id),
-      }),
-    });
+    const order = await getOrderByPaymentReference(txRef);
+    await getAuthenticatedOrder(order.id, req.headers.authorization);
+    const result = await confirmPayment(String(transactionId), txRef);
 
-    return res.redirect(`/menu?order=${encodeURIComponent(orderId)}&payment=${paymentStatus}`);
+    return res.json({
+      orderId: result.order.id,
+      orderNumber: result.order.order_number,
+      paymentStatus: result.paymentStatus,
+    });
   } catch (error) {
     console.error("Flutterwave payment verification error", error);
-    return res.status(500).send("Unable to verify payment");
+    return res.status(400).json({
+      error: error instanceof Error ? error.message : "Unable to verify payment",
+    });
+  }
+};
+
+export const handleFlutterwaveWebhook: RequestHandler = async (req, res) => {
+  const signature = req.headers["verif-hash"];
+  const { secretHash } = getConfiguration();
+
+  if (!signature || signature !== secretHash) {
+    return res.status(401).end();
+  }
+
+  const payload = req.body as {
+    event?: string;
+    data?: { id?: string | number; tx_ref?: string };
+  };
+
+  if (payload.event !== "charge.completed" || !payload.data?.id || !payload.data.tx_ref) {
+    return res.status(200).end();
+  }
+
+  try {
+    await confirmPayment(String(payload.data.id), payload.data.tx_ref);
+    return res.status(200).end();
+  } catch (error) {
+    console.error("Flutterwave webhook processing error", error);
+    return res.status(500).end();
   }
 };
