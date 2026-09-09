@@ -155,7 +155,7 @@ export const menuItemFromDatabaseRow = (row: any): MenuItem => ({
   name: row.name,
   description: row.short_description || "",
   description_full: row.full_description || row.short_description || "",
-  currency: row.currency || "USD",
+  currency: String(row.currency || "USD").toUpperCase(),
   mediaType: row.media_type || undefined,
   mediaUrl: row.media_url || undefined,
   mediaAttachmentId: row.media_attachment_id || undefined,

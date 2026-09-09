@@ -7,6 +7,9 @@ type MenuOrder = {
   order_number: string;
   payment_method: string;
   payment_status: string;
+  currency?: string | null;
+  payment_reference?: string | null;
+  flutterwave_transaction_id?: string | null;
   total_amount: number | string;
   email: string;
   first_name: string;
@@ -30,7 +33,7 @@ const getConfiguration = () => {
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
   const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const currency = process.env.FLUTTERWAVE_CURRENCY || "USD";
+  const defaultCurrency = process.env.FLUTTERWAVE_CURRENCY || "USD";
 
   if (
     !secretKey ||
@@ -50,7 +53,7 @@ const getConfiguration = () => {
     supabaseUrl,
     supabaseAnonKey,
     supabaseServiceRoleKey,
-    currency,
+    defaultCurrency,
   };
 };
 
@@ -77,10 +80,10 @@ const getAuthenticatedOrder = async (orderId: string, authorization?: string) =>
   return order;
 };
 
-const getOrderAsService = async (orderId: string) => {
+const getOrderByPaymentReference = async (paymentReference: string) => {
   const { supabaseUrl, supabaseAnonKey, supabaseServiceRoleKey } = getConfiguration();
   const response = await fetch(
-    `${supabaseUrl}/rest/v1/menu_orders?id=eq.${encodeURIComponent(orderId)}&select=*`,
+    `${supabaseUrl}/rest/v1/menu_orders?payment_reference=eq.${encodeURIComponent(paymentReference)}&select=*`,
     {
       headers: {
         apikey: supabaseAnonKey,
@@ -141,16 +144,15 @@ const verifyTransaction = async (transactionId: string) => {
 const confirmPayment = async (
   transaction: FlutterwaveTransaction,
   transactionReference: string,
+  order: MenuOrder,
 ) => {
-  const orderId = transaction.meta?.order_id;
-  if (typeof orderId !== "string") {
-    throw new Error("Payment is missing its order reference");
+  const metadataOrderId = transaction.meta?.order_id;
+  if (typeof metadataOrderId === "string" && metadataOrderId !== order.id) {
+    throw new Error("Payment metadata does not match the order");
   }
 
-  const [order, { currency }] = await Promise.all([
-    getOrderAsService(orderId),
-    Promise.resolve(getConfiguration()),
-  ]);
+  const { defaultCurrency } = getConfiguration();
+  const currency = String(order.currency || defaultCurrency).toUpperCase();
 
   if (
     transaction.status !== "successful" ||
@@ -166,6 +168,8 @@ const confirmPayment = async (
   await updateOrderAsService(order.id, {
     status: "confirmed",
     payment_status: "paid",
+    payment_reference: transactionReference,
+    flutterwave_transaction_id: String(transaction.id),
   });
 
   return { order, paymentStatus: "paid" as const };
@@ -181,7 +185,8 @@ export const createFlutterwaveInlineSession: RequestHandler = async (req, res) =
       return res.status(409).json({ error: "This order has already been paid" });
     }
 
-    const { publicKey, currency } = getConfiguration();
+    const { publicKey, defaultCurrency } = getConfiguration();
+    const currency = String(order.currency || defaultCurrency).toUpperCase();
     const amount = Number(order.total_amount);
     if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(400).json({ error: "Order total is invalid" });
@@ -189,6 +194,10 @@ export const createFlutterwaveInlineSession: RequestHandler = async (req, res) =
 
     const txRef = `sheraton-${order.order_number}-${crypto.randomUUID()}`;
     const paymentOptions = getPaymentOptions(order.payment_method, currency);
+    await updateOrderAsService(order.id, {
+      payment_reference: txRef,
+      payment_status: "pending",
+    });
 
     return res.json({
       publicKey,
@@ -221,14 +230,10 @@ export const verifyFlutterwavePayment: RequestHandler = async (req, res) => {
       return res.status(400).json({ error: "Payment verification details are required" });
     }
 
+    const order = await getOrderByPaymentReference(txRef);
+    await getAuthenticatedOrder(order.id, req.headers.authorization);
     const transaction = await verifyTransaction(String(transactionId));
-    const orderId = transaction.meta?.order_id;
-    if (typeof orderId !== "string") {
-      return res.status(400).json({ error: "Payment is missing its order reference" });
-    }
-
-    await getAuthenticatedOrder(orderId, req.headers.authorization);
-    const result = await confirmPayment(transaction, txRef);
+    const result = await confirmPayment(transaction, txRef, order);
 
     return res.json({
       orderId: result.order.id,
@@ -261,9 +266,11 @@ export const handleFlutterwaveWebhook: RequestHandler = async (req, res) => {
   }
 
   try {
+    const order = await getOrderByPaymentReference(payload.data.tx_ref);
     await confirmPayment(
       await verifyTransaction(String(payload.data.id)),
       payload.data.tx_ref,
+      order,
     );
     return res.status(200).end();
   } catch (error) {

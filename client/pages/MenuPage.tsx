@@ -147,6 +147,18 @@ const MenuPage = () => {
     }, 0);
   };
 
+  const getCartCurrency = () => {
+    const currencies = new Set(
+      Object.keys(cart).map((itemId) => menuItems.find((item) => item.id === itemId)?.currency || "USD"),
+    );
+    return currencies.size === 1 ? [...currencies][0] : null;
+  };
+
+  const formatCartTotal = () => {
+    const currency = getCartCurrency();
+    return currency ? formatPrice(getTotalPrice(), currency) : "Multiple currencies";
+  };
+
   const getTotalItems = () => {
     return Object.values(cart).reduce((total, quantity) => total + quantity, 0);
   };
@@ -425,11 +437,11 @@ const MenuPage = () => {
                             <div className="text-right">
                               <div className="flex items-center gap-2 mb-2">
                                 {discountPercent > 0 && (
-                                  <span className="text-sm text-muted-foreground line-through" aria-label={`Original price $${item.originalPrice}`}>
+                                  <span className="text-sm text-muted-foreground line-through" aria-label={`Original price ${formatPrice(item.originalPrice, item.currency)}`}>
                                     {formatPrice(item.originalPrice, item.currency)}
                                   </span>
                                 )}
-                                <span className="text-2xl font-bold text-sheraton-navy" aria-label={`Current price $${item.price}`}>
+                                <span className="text-2xl font-bold text-sheraton-navy" aria-label={`Current price ${formatPrice(item.price, item.currency)}`}>
                                   {formatPrice(item.price, item.currency)}
                                 </span>
                                 {discountPercent > 0 && (
@@ -603,7 +615,7 @@ const MenuPage = () => {
                     </Badge>
                   </div>
                   <div>
-                    <div className="font-semibold">${getTotalPrice()}</div>
+                    <div className="font-semibold">{formatCartTotal()}</div>
                     <div className="text-xs text-white/80">
                       {getTotalItems()} items
                     </div>
