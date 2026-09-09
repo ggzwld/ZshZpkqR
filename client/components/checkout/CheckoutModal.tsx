@@ -1,10 +1,4 @@
 import React, { useEffect, useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -53,6 +47,7 @@ interface MenuItem {
   id: string;
   name: string;
   price: number;
+  currency?: string;
   image: string;
   cookTime: string;
 }
@@ -105,6 +100,18 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [estimatedTime, setEstimatedTime] = useState("25-30 minutes");
   const [orderNumber, setOrderNumber] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
+  const [isGatewayOpen, setIsGatewayOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -144,6 +151,19 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       const item = menuItems.find((i) => i.id === itemId);
       return total + (item ? item.price * quantity : 0);
     }, 0);
+  };
+
+  const getCurrency = () => {
+    const currencies = new Set(
+      getCartItems().map(({ item }) => item?.currency || "USD"),
+    );
+    return currencies.size === 1 ? [...currencies][0] : null;
+  };
+
+  const formatAmount = (amount: number, currency = getCurrency()) => {
+    return currency
+      ? new Intl.NumberFormat(undefined, { style: "currency", currency }).format(amount)
+      : "Multiple currencies";
   };
 
   const getTax = () => {
@@ -194,58 +214,71 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     await loadFlutterwaveCheckout();
     if (!window.FlutterwaveCheckout) throw new Error("Secure checkout is unavailable.");
 
-    let checkout: { close: () => void } | undefined;
-    checkout = window.FlutterwaveCheckout({
-      public_key: paymentSession.publicKey,
-      tx_ref: paymentSession.txRef,
-      amount: paymentSession.amount,
-      currency: paymentSession.currency,
-      payment_options: paymentSession.paymentOptions,
-      customer: {
-        email: paymentSession.customer.email,
-        name: paymentSession.customer.name,
-        phone_number: paymentSession.customer.phoneNumber,
-      },
-      customizations: {
-        title: "Sheraton Special",
-        description: `Order ${paymentSession.txRef}`,
-      },
-      callback: async (payment) => {
-        try {
-          const verificationResponse = await fetch("/api/payments/flutterwave/verify", {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${session.access_token}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              transactionId: payment.transaction_id,
-              txRef: payment.tx_ref,
-            }),
-          });
-          const verification = await verificationResponse.json();
-          if (!verificationResponse.ok || verification.paymentStatus !== "paid") {
-            throw new Error(verification.error || "Payment was not completed.");
-          }
+    setIsGatewayOpen(true);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let completed = false;
+      let checkout: { close: () => void } | undefined;
 
-          checkout?.close();
-          setOrderNumber(verification.orderNumber);
-          setOrderConfirmed(true);
-          setPendingPaymentOrder(null);
-          setStep("confirmation");
-        } catch (error) {
-          setCheckoutError(error instanceof Error ? error.message : "We could not verify your payment.");
-        } finally {
-          setIsProcessing(false);
-        }
-      },
-      onclose: (incomplete) => {
-        if (incomplete) {
-          setCheckoutError("Payment was not completed. You can try again when ready.");
-          setIsProcessing(false);
-        }
-      },
-    });
+      const finish = (error?: Error) => {
+        if (completed) return;
+        completed = true;
+        if (error) reject(error);
+        else resolve();
+      };
+
+      checkout = window.FlutterwaveCheckout({
+        public_key: paymentSession.publicKey,
+        tx_ref: paymentSession.txRef,
+        amount: paymentSession.amount,
+        currency: paymentSession.currency,
+        payment_options: paymentSession.paymentOptions,
+        customer: {
+          email: paymentSession.customer.email,
+          name: paymentSession.customer.name,
+          phone_number: paymentSession.customer.phoneNumber,
+        },
+        meta: { order_id: paymentSession.orderId },
+        customizations: {
+          title: "Sheraton Special",
+          description: `Order ${paymentSession.txRef}`,
+        },
+        callback: async (payment) => {
+          try {
+            const verificationResponse = await fetch("/api/payments/flutterwave/verify", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${session.access_token}`,
+                "content-type": "application/json",
+              },
+              body: JSON.stringify({
+                transactionId: payment.transaction_id,
+                txRef: payment.tx_ref,
+              }),
+            });
+            const verification = await verificationResponse.json();
+            if (!verificationResponse.ok || verification.paymentStatus !== "paid") {
+              throw new Error(verification.error || "Payment was not completed.");
+            }
+
+            setOrderNumber(verification.orderNumber);
+            setOrderConfirmed(true);
+            setPendingPaymentOrder(null);
+            setStep("confirmation");
+            finish();
+            checkout?.close();
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error("We could not verify your payment."));
+          }
+        },
+        onclose: () => {
+          finish(new Error("Payment was not completed. You can try again when ready."));
+        },
+        });
+      });
+    } finally {
+      setIsGatewayOpen(false);
+    }
   };
 
   const handlePlaceOrder = async () => {
@@ -261,6 +294,9 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Please sign in before placing an order.");
 
+      const currency = getCurrency();
+      if (!currency) throw new Error("Please checkout items in the same currency.");
+
       const orderNumberValue = `SH${Date.now().toString().slice(-8)}`;
       const { data: order, error: orderError } = await supabase
         .from("menu_orders")
@@ -271,6 +307,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
           status: "pending",
           payment_method: paymentMethod,
           payment_status: "pending",
+          currency,
           first_name: customerInfo.firstName.trim(),
           last_name: customerInfo.lastName.trim(),
           email: customerInfo.email.trim(),
@@ -382,7 +419,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 <span className="text-2xl">{item.image}</span>
                 <div>
                   <h4 className="font-medium">{item.name}</h4>
-                  <p className="text-sm text-gray-600">${item.price} each</p>
+                  <p className="text-sm text-gray-600">{formatAmount(item.price, item.currency || "USD")} each</p>
                   <p className="text-xs text-gray-500">
                     <Clock className="h-3 w-3 inline mr-1" />
                     {item.cookTime}
@@ -424,22 +461,22 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       <div className="space-y-2">
         <div className="flex justify-between">
           <span>Subtotal</span>
-          <span>${getSubtotal().toFixed(2)}</span>
+          <span>{formatAmount(getSubtotal())}</span>
         </div>
         <div className="flex justify-between">
           <span>Tax (8%)</span>
-          <span>${getTax().toFixed(2)}</span>
+          <span>{formatAmount(getTax())}</span>
         </div>
         {orderType === "room-service" && (
           <div className="flex justify-between">
             <span>Service Fee</span>
-            <span>${getServiceFee().toFixed(2)}</span>
+            <span>{formatAmount(getServiceFee())}</span>
           </div>
         )}
         <Separator />
         <div className="flex justify-between font-semibold text-lg">
           <span>Total</span>
-          <span>${(getSubtotal() + getTax() + getServiceFee()).toFixed(2)}</span>
+          <span>{formatAmount(getSubtotal() + getTax() + getServiceFee())}</span>
         </div>
       </div>
 
@@ -602,7 +639,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
           <span>Available: {loyaltyPoints.toLocaleString()} points</span>
           {usePoints && (
             <span className="text-green-600 font-medium">
-              -${getPointsDiscount().toFixed(2)}
+              -{formatAmount(getPointsDiscount())}
             </span>
           )}
         </div>
@@ -647,7 +684,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
             step="0.01"
             min="0"
           />
-          <span className="text-sm">$</span>
+          <span className="text-sm">{getCurrency() || "Amount"}</span>
         </div>
       </div>
 
@@ -708,7 +745,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
             Secure card checkout
           </div>
           <p className="mt-2 text-sm text-gray-600">
-            Your card details are entered only in the secure payment window and are never handled by Sheraton Special.
+            A secure checkout opens over this page. Your card details go directly to Flutterwave and are never handled by Sheraton Special.
           </p>
         </div>
       )}
@@ -730,7 +767,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       {paymentMethod === "mobile-money" && (
         <div className="rounded-lg bg-purple-50 p-4">
           <p className="text-sm text-purple-700">
-            Continue to the secure payment window to authorise Mobile Money with the phone number in your order details.
+            A secure checkout opens over this page to approve Mobile Money using the phone number in your order details.
           </p>
         </div>
       )}
@@ -753,34 +790,34 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
         <div className="space-y-2 text-sm">
           <div className="flex justify-between">
             <span>Subtotal</span>
-            <span>${getSubtotal().toFixed(2)}</span>
+            <span>{formatAmount(getSubtotal())}</span>
           </div>
           <div className="flex justify-between">
             <span>Tax</span>
-            <span>${getTax().toFixed(2)}</span>
+            <span>{formatAmount(getTax())}</span>
           </div>
           {getServiceFee() > 0 && (
             <div className="flex justify-between">
               <span>Service Fee</span>
-              <span>${getServiceFee().toFixed(2)}</span>
+              <span>{formatAmount(getServiceFee())}</span>
             </div>
           )}
           {tipAmount > 0 && (
             <div className="flex justify-between">
               <span>Tip</span>
-              <span>${tipAmount.toFixed(2)}</span>
+              <span>{formatAmount(tipAmount)}</span>
             </div>
           )}
           {usePoints && getPointsDiscount() > 0 && (
             <div className="flex justify-between text-green-600">
               <span>Points Discount</span>
-              <span>-${getPointsDiscount().toFixed(2)}</span>
+              <span>-{formatAmount(getPointsDiscount())}</span>
             </div>
           )}
           <Separator />
           <div className="flex justify-between font-semibold text-lg">
             <span>Total</span>
-            <span>${getFinalTotal().toFixed(2)}</span>
+            <span>{formatAmount(getFinalTotal())}</span>
           </div>
         </div>
       </div>
@@ -805,7 +842,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
             "Processing..."
           ) : (
             <>
-              {paymentMethod === "card" || paymentMethod === "mobile-money" ? "Pay securely" : "Place Order"} ${getFinalTotal().toFixed(2)}
+              {paymentMethod === "card" || paymentMethod === "mobile-money" ? "Pay securely" : "Place Order"} {formatAmount(getFinalTotal())}
               <Receipt className="h-4 w-4 ml-2" />
             </>
           )}
@@ -845,7 +882,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
             <div className="text-gray-600">
               {paymentMethod === "card" || paymentMethod === "mobile-money" ? "Payment received" : "Amount due"}
             </div>
-            <div className="font-medium">${getFinalTotal().toFixed(2)}</div>
+            <div className="font-medium">{formatAmount(getFinalTotal())}</div>
           </div>
         </div>
       </div>
@@ -886,16 +923,29 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <Dialog open={isOpen} onOpenChange={handleClose}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center space-x-2">
-            <Crown className="h-5 w-5 text-sheraton-gold" />
-            <span>Complete Your Order</span>
-          </DialogTitle>
-        </DialogHeader>
+    <div className="fixed inset-0 z-[60] bg-background">
+      <main aria-labelledby="checkout-title" className={`h-full p-4 sm:p-6 ${isGatewayOpen ? "overflow-hidden" : "overflow-y-auto"}`}>
+        <div className="mx-auto max-w-3xl">
+          <header className="relative pr-10">
+            <h1 id="checkout-title" className="flex items-center space-x-2 text-lg font-semibold">
+              <Crown className="h-5 w-5 text-sheraton-gold" />
+              <span>Complete Your Order</span>
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              Review your order, then complete payment securely without leaving this page.
+            </p>
+            <button
+              type="button"
+              onClick={handleClose}
+              disabled={isProcessing}
+              aria-label="Close checkout"
+              className="absolute right-0 top-0 rounded-sm p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </header>
 
-        {/* Step Indicator */}
+          {/* Step Indicator */}
         <div className="flex items-center justify-center space-x-4 mb-6">
           {[
             { id: "cart", label: "Cart", icon: ShoppingCart },
@@ -946,10 +996,11 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
         {/* Content */}
         {step === "cart" && renderCartStep()}
         {step === "details" && renderDetailsStep()}
-        {step === "payment" && renderPaymentStep()}
-        {step === "confirmation" && renderConfirmationStep()}
-      </DialogContent>
-    </Dialog>
+          {step === "payment" && renderPaymentStep()}
+          {step === "confirmation" && renderConfirmationStep()}
+        </div>
+      </main>
+    </div>
   );
 };
 

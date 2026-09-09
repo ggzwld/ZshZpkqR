@@ -7,7 +7,9 @@ type MenuOrder = {
   order_number: string;
   payment_method: string;
   payment_status: string;
-  payment_reference: string | null;
+  currency?: string | null;
+  payment_reference?: string | null;
+  flutterwave_transaction_id?: string | null;
   total_amount: number | string;
   email: string;
   first_name: string;
@@ -21,16 +23,17 @@ type FlutterwaveTransaction = {
   status: string;
   amount: number | string;
   currency: string;
+  meta?: Record<string, unknown>;
 };
 
 const getConfiguration = () => {
   const secretKey = process.env.FLUTTERWAVE_SECRET_KEY;
-  const publicKey = process.env.FLUTTERWAVE_PUBLIC_KEY;
+  const publicKey = process.env.VITE_FLUTTERWAVE_PUBLIC_KEY;
   const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
   const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  const currency = process.env.FLUTTERWAVE_CURRENCY || "USD";
+  const defaultCurrency = process.env.FLUTTERWAVE_CURRENCY || "USD";
 
   if (
     !secretKey ||
@@ -50,7 +53,7 @@ const getConfiguration = () => {
     supabaseUrl,
     supabaseAnonKey,
     supabaseServiceRoleKey,
-    currency,
+    defaultCurrency,
   };
 };
 
@@ -138,14 +141,21 @@ const verifyTransaction = async (transactionId: string) => {
   return payload.data as FlutterwaveTransaction;
 };
 
-const confirmPayment = async (transactionId: string, transactionReference: string) => {
-  const [transaction, order] = await Promise.all([
-    verifyTransaction(transactionId),
-    getOrderByPaymentReference(transactionReference),
-  ]);
-  const { currency } = getConfiguration();
+const confirmPayment = async (
+  transaction: FlutterwaveTransaction,
+  transactionReference: string,
+  order: MenuOrder,
+) => {
+  const metadataOrderId = transaction.meta?.order_id;
+  if (typeof metadataOrderId === "string" && metadataOrderId !== order.id) {
+    throw new Error("Payment metadata does not match the order");
+  }
+
+  const { defaultCurrency } = getConfiguration();
+  const currency = String(order.currency || defaultCurrency).toUpperCase();
 
   if (
+    transaction.status !== "successful" ||
     transaction.tx_ref !== transactionReference ||
     Number(transaction.amount) !== Number(order.total_amount) ||
     transaction.currency !== currency
@@ -155,14 +165,14 @@ const confirmPayment = async (transactionId: string, transactionReference: strin
 
   if (order.payment_status === "paid") return { order, paymentStatus: "paid" as const };
 
-  const paymentStatus = transaction.status === "successful" ? "paid" : "failed";
   await updateOrderAsService(order.id, {
-    status: paymentStatus === "paid" ? "confirmed" : "pending",
-    payment_status: paymentStatus,
+    status: "confirmed",
+    payment_status: "paid",
+    payment_reference: transactionReference,
     flutterwave_transaction_id: String(transaction.id),
   });
 
-  return { order, paymentStatus };
+  return { order, paymentStatus: "paid" as const };
 };
 
 export const createFlutterwaveInlineSession: RequestHandler = async (req, res) => {
@@ -175,13 +185,15 @@ export const createFlutterwaveInlineSession: RequestHandler = async (req, res) =
       return res.status(409).json({ error: "This order has already been paid" });
     }
 
-    const { publicKey, currency } = getConfiguration();
+    const { publicKey, defaultCurrency } = getConfiguration();
+    const currency = String(order.currency || defaultCurrency).toUpperCase();
     const amount = Number(order.total_amount);
     if (!Number.isFinite(amount) || amount <= 0) {
       return res.status(400).json({ error: "Order total is invalid" });
     }
 
     const txRef = `sheraton-${order.order_number}-${crypto.randomUUID()}`;
+    const paymentOptions = getPaymentOptions(order.payment_method, currency);
     await updateOrderAsService(order.id, {
       payment_reference: txRef,
       payment_status: "pending",
@@ -190,9 +202,10 @@ export const createFlutterwaveInlineSession: RequestHandler = async (req, res) =
     return res.json({
       publicKey,
       txRef,
+      orderId: order.id,
       amount,
       currency,
-      paymentOptions: getPaymentOptions(order.payment_method, currency),
+      paymentOptions,
       customer: {
         email: order.email,
         name: `${order.first_name} ${order.last_name}`.trim(),
@@ -219,7 +232,8 @@ export const verifyFlutterwavePayment: RequestHandler = async (req, res) => {
 
     const order = await getOrderByPaymentReference(txRef);
     await getAuthenticatedOrder(order.id, req.headers.authorization);
-    const result = await confirmPayment(String(transactionId), txRef);
+    const transaction = await verifyTransaction(String(transactionId));
+    const result = await confirmPayment(transaction, txRef, order);
 
     return res.json({
       orderId: result.order.id,
@@ -252,7 +266,12 @@ export const handleFlutterwaveWebhook: RequestHandler = async (req, res) => {
   }
 
   try {
-    await confirmPayment(String(payload.data.id), payload.data.tx_ref);
+    const order = await getOrderByPaymentReference(payload.data.tx_ref);
+    await confirmPayment(
+      await verifyTransaction(String(payload.data.id)),
+      payload.data.tx_ref,
+      order,
+    );
     return res.status(200).end();
   } catch (error) {
     console.error("Flutterwave webhook processing error", error);

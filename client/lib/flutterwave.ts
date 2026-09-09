@@ -15,6 +15,7 @@ interface FlutterwaveCheckoutOptions {
     name?: string;
     phone_number?: string;
   };
+  meta?: Record<string, string>;
   customizations: {
     title: string;
     description: string;
