@@ -105,11 +105,16 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
-    const previousOverflow = document.body.style.overflow;
+    const root = document.documentElement;
+    const previousRootOverflow = root.style.overflow;
+    const previousBodyOverflow = document.body.style.overflow;
+
+    root.style.overflow = "hidden";
     document.body.style.overflow = "hidden";
 
     return () => {
-      document.body.style.overflow = previousOverflow;
+      root.style.overflow = previousRootOverflow;
+      document.body.style.overflow = previousBodyOverflow;
     };
   }, [isOpen]);
 
@@ -407,7 +412,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
         </div>
       </div>
 
-      <div className="space-y-4 max-h-64 overflow-y-auto">
+      <div className="space-y-4">
         {getCartItems().map(({ item, quantity }) => {
           if (!item) return null;
           return (
