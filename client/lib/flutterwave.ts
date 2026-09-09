@@ -24,7 +24,7 @@ interface FlutterwaveCheckoutOptions {
   onclose: (incomplete: boolean) => void;
 }
 
-interface FlutterwaveCheckoutInstance {
+export interface FlutterwaveCheckoutInstance {
   close: () => void;
 }
 

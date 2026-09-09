@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -40,7 +41,10 @@ import {
   X,
   ShoppingCart,
 } from "lucide-react";
-import { loadFlutterwaveCheckout } from "../../lib/flutterwave";
+import {
+  loadFlutterwaveCheckout,
+  FlutterwaveCheckoutInstance,
+} from "../../lib/flutterwave";
 import { supabase } from "../../lib/supabase";
 
 interface MenuItem {
@@ -101,6 +105,24 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [orderNumber, setOrderNumber] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
   const [isGatewayOpen, setIsGatewayOpen] = useState(false);
+  const gatewayRef = useRef<FlutterwaveCheckoutInstance | null>(null);
+  const isMountedRef = useRef(true);
+
+  const closeGateway = () => {
+    const gateway = gatewayRef.current;
+    gatewayRef.current = null;
+    gateway?.close();
+    if (isMountedRef.current) setIsGatewayOpen(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+      const gateway = gatewayRef.current;
+      gatewayRef.current = null;
+      gateway?.close();
+    };
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -219,70 +241,71 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     await loadFlutterwaveCheckout();
     if (!window.FlutterwaveCheckout) throw new Error("Secure checkout is unavailable.");
 
-    setIsGatewayOpen(true);
+    flushSync(() => setIsGatewayOpen(true));
     try {
       await new Promise<void>((resolve, reject) => {
         let completed = false;
-      let checkout: { close: () => void } | undefined;
 
-      const finish = (error?: Error) => {
-        if (completed) return;
-        completed = true;
-        if (error) reject(error);
-        else resolve();
-      };
+        const finish = (error?: Error) => {
+          if (completed) return;
+          completed = true;
+          if (error) reject(error);
+          else resolve();
+        };
 
-      checkout = window.FlutterwaveCheckout({
-        public_key: paymentSession.publicKey,
-        tx_ref: paymentSession.txRef,
-        amount: paymentSession.amount,
-        currency: paymentSession.currency,
-        payment_options: paymentSession.paymentOptions,
-        customer: {
-          email: paymentSession.customer.email,
-          name: paymentSession.customer.name,
-          phone_number: paymentSession.customer.phoneNumber,
-        },
-        meta: { order_id: paymentSession.orderId },
-        customizations: {
-          title: "Sheraton Special",
-          description: `Order ${paymentSession.txRef}`,
-        },
-        callback: async (payment) => {
-          try {
-            const verificationResponse = await fetch("/api/payments/flutterwave/verify", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${session.access_token}`,
-                "content-type": "application/json",
-              },
-              body: JSON.stringify({
-                transactionId: payment.transaction_id,
-                txRef: payment.tx_ref,
-              }),
-            });
-            const verification = await verificationResponse.json();
-            if (!verificationResponse.ok || verification.paymentStatus !== "paid") {
-              throw new Error(verification.error || "Payment was not completed.");
+        gatewayRef.current = window.FlutterwaveCheckout!({
+          public_key: paymentSession.publicKey,
+          tx_ref: paymentSession.txRef,
+          amount: paymentSession.amount,
+          currency: paymentSession.currency,
+          payment_options: paymentSession.paymentOptions,
+          customer: {
+            email: paymentSession.customer.email,
+            name: paymentSession.customer.name,
+            phone_number: paymentSession.customer.phoneNumber,
+          },
+          meta: { order_id: paymentSession.orderId },
+          customizations: {
+            title: "Sheraton Special",
+            description: `Order ${paymentSession.txRef}`,
+          },
+          callback: async (payment) => {
+            try {
+              const verificationResponse = await fetch("/api/payments/flutterwave/verify", {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${session.access_token}`,
+                  "content-type": "application/json",
+                },
+                body: JSON.stringify({
+                  transactionId: payment.transaction_id,
+                  txRef: payment.tx_ref,
+                }),
+              });
+              const verification = await verificationResponse.json();
+              if (!verificationResponse.ok || verification.paymentStatus !== "paid") {
+                throw new Error(verification.error || "Payment was not completed.");
+              }
+
+              if (isMountedRef.current) {
+                setOrderNumber(verification.orderNumber);
+                setOrderConfirmed(true);
+                setPendingPaymentOrder(null);
+                setStep("confirmation");
+              }
+              finish();
+            } catch (error) {
+              finish(error instanceof Error ? error : new Error("We could not verify your payment."));
             }
-
-            setOrderNumber(verification.orderNumber);
-            setOrderConfirmed(true);
-            setPendingPaymentOrder(null);
-            setStep("confirmation");
-            finish();
-            checkout?.close();
-          } catch (error) {
-            finish(error instanceof Error ? error : new Error("We could not verify your payment."));
-          }
-        },
-        onclose: () => {
-          finish(new Error("Payment was not completed. You can try again when ready."));
-        },
+          },
+          onclose: () => {
+            gatewayRef.current = null;
+            finish(new Error("Payment was not completed. You can try again when ready."));
+          },
         });
       });
     } finally {
-      setIsGatewayOpen(false);
+      closeGateway();
     }
   };
 
@@ -359,9 +382,11 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       setStep("confirmation");
     } catch (error) {
       console.error("Unable to process menu order", error);
-      setCheckoutError(error instanceof Error ? error.message : "We could not process your order.");
+      if (isMountedRef.current) {
+        setCheckoutError(error instanceof Error ? error.message : "We could not process your order.");
+      }
     } finally {
-      setIsProcessing(false);
+      if (isMountedRef.current) setIsProcessing(false);
     }
   };
 
@@ -928,8 +953,11 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[60] bg-background">
-      <main aria-labelledby="checkout-title" className={`h-full p-4 sm:p-6 ${isGatewayOpen ? "overflow-hidden" : "overflow-y-auto"}`}>
+    <div className="fixed inset-0 z-[60] flex h-[100dvh] flex-col overflow-hidden bg-background">
+      <main
+        aria-labelledby="checkout-title"
+        className={`min-h-0 flex-1 overflow-x-hidden p-4 sm:p-6 ${isGatewayOpen ? "overflow-hidden" : "overflow-y-auto"}`}
+      >
         <div className="mx-auto max-w-3xl">
           <header className="relative pr-10">
             <h1 id="checkout-title" className="flex items-center space-x-2 text-lg font-semibold">
@@ -951,7 +979,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
           </header>
 
           {/* Step Indicator */}
-        <div className="flex items-center justify-center space-x-4 mb-6">
+        <div className="mb-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
           {[
             { id: "cart", label: "Cart", icon: ShoppingCart },
             { id: "details", label: "Details", icon: User },
