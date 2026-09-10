@@ -315,6 +315,8 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
     } catch (error) {
       console.error("Unable to process menu order", error);
       if (isMountedRef.current) {
+        setIsProcessing(false);
+        setIsRedirecting(false);
         setCheckoutError(error instanceof Error ? error.message : "We could not process your order.");
       }
     } finally {
