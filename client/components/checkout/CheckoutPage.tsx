@@ -40,7 +40,12 @@ import {
   X,
   ShoppingCart,
 } from "lucide-react";
-import type { FlutterwaveHostedSession } from "../../lib/flutterwave";
+import {
+  clearPendingCheckout,
+  getPendingCheckout,
+  savePendingCheckout,
+  type FlutterwaveHostedSession,
+} from "../../lib/flutterwave";
 import { supabase } from "../../lib/supabase";
 
 interface MenuItem {
@@ -94,6 +99,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
   const [tipAmount, setTipAmount] = useState<number>(0);
   const [tipPercentage, setTipPercentage] = useState<number>(18);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
   const [orderConfirmed, setOrderConfirmed] = useState(false);
   const [estimatedTime, setEstimatedTime] = useState("25-30 minutes");
   const [orderNumber, setOrderNumber] = useState("");
@@ -104,6 +110,22 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
     return () => {
       isMountedRef.current = false;
     };
+  }, []);
+
+  useEffect(() => {
+    const pendingCheckout = getPendingCheckout();
+    if (pendingCheckout) {
+      setPendingPaymentOrder({
+        id: pendingCheckout.orderId,
+        orderNumber: pendingCheckout.orderNumber,
+      });
+      setOrderType(pendingCheckout.orderType);
+      setPaymentMethod(pendingCheckout.paymentMethod);
+      setTipAmount(pendingCheckout.tipAmount);
+      setTipPercentage(pendingCheckout.tipPercentage);
+      setUsePoints(pendingCheckout.usePoints);
+      setStep("payment");
+    }
   }, []);
 
   useEffect(() => {
@@ -187,7 +209,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
     setTipPercentage(percentage);
   };
 
-  const startOnlinePayment = async ({ id }: { id: string }) => {
+  const startOnlinePayment = async ({ id, orderNumber }: { id: string; orderNumber: string }) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) throw new Error("Please sign in before paying.");
 
@@ -204,7 +226,19 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
       throw new Error(("error" in paymentSession && paymentSession.error) || "Unable to prepare secure checkout.");
     }
 
-    window.location.assign(paymentSession.paymentUrl);
+    savePendingCheckout({
+      orderId: id,
+      orderNumber,
+      cart,
+      orderType,
+      paymentMethod,
+      tipAmount,
+      tipPercentage,
+      usePoints,
+    });
+    setIsRedirecting(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+    window.location.replace(paymentSession.paymentUrl);
   };
 
   const handlePlaceOrder = async () => {
@@ -304,6 +338,8 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
       specialRequests: "",
     });
     setPendingPaymentOrder(null);
+    setIsRedirecting(false);
+    clearPendingCheckout();
     setUsePoints(false);
     setTipAmount(0);
     setTipPercentage(18);
@@ -314,6 +350,16 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
     resetCheckout();
     onBack();
   };
+
+  const renderRedirectingStep = () => (
+    <div className="flex min-h-[420px] flex-col items-center justify-center rounded-xl border bg-white px-6 text-center shadow-sm">
+      <div className="h-10 w-10 animate-spin rounded-full border-4 border-sheraton-gold/30 border-t-sheraton-gold" aria-hidden="true" />
+      <h2 className="mt-6 text-2xl font-semibold text-sheraton-navy">Opening secure payment</h2>
+      <p className="mt-2 max-w-md text-sm text-muted-foreground">
+        You’re being taken to Flutterwave’s secure checkout. Please keep this tab open while the payment page loads.
+      </p>
+    </div>
+  );
 
   const renderCartStep = () => (
     <div className="space-y-6">
@@ -923,10 +969,14 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
         </div>
 
         {/* Content */}
-        {step === "cart" && renderCartStep()}
-        {step === "details" && renderDetailsStep()}
-          {step === "payment" && renderPaymentStep()}
-          {step === "confirmation" && renderConfirmationStep()}
+        {isRedirecting ? renderRedirectingStep() : (
+          <>
+            {step === "cart" && renderCartStep()}
+            {step === "details" && renderDetailsStep()}
+            {step === "payment" && renderPaymentStep()}
+            {step === "confirmation" && renderConfirmationStep()}
+          </>
+        )}
         </div>
       </main>
     </div>

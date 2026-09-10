@@ -4,6 +4,7 @@ import { Button } from "../components/ui/button";
 import CheckoutPage from "../components/checkout/CheckoutPage";
 import { menuItemFromDatabaseRow, MenuItem } from "../lib/menuData";
 import { supabase } from "../lib/supabase";
+import { getPendingCheckout } from "../lib/flutterwave";
 import {
   Card,
   CardContent,
@@ -69,6 +70,13 @@ const MenuPage = () => {
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const pendingCheckout = getPendingCheckout();
+    if (!pendingCheckout) return;
+    setCart(pendingCheckout.cart);
+    setShowCheckoutPage(true);
   }, []);
 
   const categories = [

@@ -1,7 +1,17 @@
 import type { RequestHandler } from "express";
 
 const flutterwaveBaseUrl = "https://api.flutterwave.com/v3";
-const flutterwaveReturnPath = "/checkout/flutterwave-return";
+
+const getFlutterwaveReturnUrl = () => {
+  const configuredReturnUrl = process.env.FLUTTERWAVE_RETURN_URL;
+  if (configuredReturnUrl) return configuredReturnUrl;
+
+  if (process.env.NODE_ENV !== "production" && process.env.FLUTTERWAVE_LOCAL_RETURN_URL) {
+    return process.env.FLUTTERWAVE_LOCAL_RETURN_URL;
+  }
+
+  throw new Error("Flutterwave return URL is not configured");
+};
 
 type MenuOrder = {
   id: string;
@@ -192,7 +202,7 @@ export const createFlutterwaveHostedSession: RequestHandler = async (req, res) =
 
     const txRef = `sheraton-${order.order_number}-${crypto.randomUUID()}`;
     const paymentOptions = getPaymentOptions(order.payment_method, currency);
-    const origin = `${req.protocol}://${req.get("host")}`;
+    const returnUrl = getFlutterwaveReturnUrl();
     const response = await fetch(`${flutterwaveBaseUrl}/payments`, {
       method: "POST",
       headers: {
@@ -204,7 +214,7 @@ export const createFlutterwaveHostedSession: RequestHandler = async (req, res) =
         amount,
         currency,
         payment_options: paymentOptions,
-        redirect_url: `${origin}${flutterwaveReturnPath}`,
+        redirect_url: returnUrl,
         customer: {
           email: order.email,
           name: `${order.first_name} ${order.last_name}`.trim(),
