@@ -197,7 +197,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
         Authorization: `Bearer ${session.access_token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ orderId: order.id }),
+      body: JSON.stringify({ orderId: id }),
     });
     const paymentSession = (await sessionResponse.json()) as FlutterwaveHostedSession | { error?: string };
     if (!sessionResponse.ok || !("paymentUrl" in paymentSession)) {
