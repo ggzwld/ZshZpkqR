@@ -56,18 +56,16 @@ interface MenuItem {
   cookTime: string;
 }
 
-interface CheckoutModalProps {
-  isOpen: boolean;
-  onClose: () => void;
+interface CheckoutPageProps {
+  onBack: () => void;
   cart: { [key: string]: number };
   menuItems: MenuItem[];
   onUpdateCart: (itemId: string, quantity: number) => void;
   onRemoveFromCart: (itemId: string) => void;
 }
 
-const CheckoutModal: React.FC<CheckoutModalProps> = ({
-  isOpen,
-  onClose,
+const CheckoutPage: React.FC<CheckoutPageProps> = ({
+  onBack,
   cart,
   menuItems,
   onUpdateCart,
@@ -125,7 +123,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
   }, []);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isGatewayOpen) return;
 
     const root = document.documentElement;
     const previousRootOverflow = root.style.overflow;
@@ -138,11 +136,9 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       root.style.overflow = previousRootOverflow;
       document.body.style.overflow = previousBodyOverflow;
     };
-  }, [isOpen]);
+  }, [isGatewayOpen]);
 
   useEffect(() => {
-    if (!isOpen) return;
-
     const loadProfile = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -164,7 +160,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     };
 
     loadProfile().catch((error) => console.error("Unable to load checkout profile", error));
-  }, [isOpen]);
+  }, []);
 
   const getCartItems = () => {
     return Object.entries(cart).map(([itemId, quantity]) => {
@@ -390,7 +386,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     }
   };
 
-  const resetModal = () => {
+  const resetCheckout = () => {
     setStep("cart");
     setOrderType("dine-in");
     setPaymentMethod("card");
@@ -412,9 +408,9 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     setCheckoutError("");
   };
 
-  const handleClose = () => {
-    resetModal();
-    onClose();
+  const handleBack = () => {
+    resetCheckout();
+    onBack();
   };
 
   const renderCartStep = () => (
@@ -511,7 +507,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       </div>
 
       <div className="flex space-x-3">
-        <Button variant="outline" onClick={handleClose} className="flex-1">
+        <Button variant="outline" onClick={handleBack} className="flex-1">
           Continue Shopping
         </Button>
         <Button
@@ -937,11 +933,11 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       </div>
 
       <div className="flex space-x-3">
-        <Button variant="outline" onClick={handleClose} className="flex-1">
+        <Button variant="outline" onClick={handleBack} className="flex-1">
           Order More
         </Button>
         <Button
-          onClick={handleClose}
+          onClick={handleBack}
           className="flex-1 bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy"
         >
           Done
@@ -950,32 +946,30 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     </div>
   );
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 z-[60] flex h-[100dvh] flex-col overflow-hidden bg-background">
-      <main
-        aria-labelledby="checkout-title"
-        className={`min-h-0 flex-1 overflow-x-hidden p-4 sm:p-6 ${isGatewayOpen ? "overflow-hidden" : "overflow-y-auto"}`}
-      >
+    <div className="w-full bg-background">
+      <main aria-labelledby="checkout-title" className="container py-8 sm:py-10">
         <div className="mx-auto max-w-3xl">
-          <header className="relative pr-10">
-            <h1 id="checkout-title" className="flex items-center space-x-2 text-lg font-semibold">
-              <Crown className="h-5 w-5 text-sheraton-gold" />
-              <span>Complete Your Order</span>
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              Review your order, then complete payment securely without leaving this page.
-            </p>
-            <button
+          <header className="mb-6 flex items-start justify-between gap-4 border-b pb-6">
+            <div>
+              <h1 id="checkout-title" className="flex items-center space-x-2 text-lg font-semibold">
+                <Crown className="h-5 w-5 text-sheraton-gold" />
+                <span>Complete Your Order</span>
+              </h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Review your order, then complete payment securely without leaving this page.
+              </p>
+            </div>
+            <Button
               type="button"
-              onClick={handleClose}
+              variant="outline"
+              onClick={handleBack}
               disabled={isProcessing}
-              aria-label="Close checkout"
-              className="absolute right-0 top-0 rounded-sm p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+              className="shrink-0"
             >
-              <X className="h-4 w-4" />
-            </button>
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Back to Menu
+            </Button>
           </header>
 
           {/* Step Indicator */}
@@ -1037,4 +1031,4 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
   );
 };
 
-export default CheckoutModal;
+export default CheckoutPage;

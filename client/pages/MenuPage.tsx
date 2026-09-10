@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "../components/ui/button";
-import CheckoutModal from "../components/checkout/CheckoutModal";
+import CheckoutPage from "../components/checkout/CheckoutPage";
 import { menuItemFromDatabaseRow, MenuItem } from "../lib/menuData";
 import { supabase } from "../lib/supabase";
 import {
@@ -64,7 +64,7 @@ const MenuPage = () => {
   const [cart, setCart] = useState<{ [key: string]: number }>({});
   const [currentTime, setCurrentTime] = useState(new Date());
   const [activeTab, setActiveTab] = useState("food");
-  const [showCheckout, setShowCheckout] = useState(false);
+  const [showCheckoutPage, setShowCheckoutPage] = useState(false);
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -210,6 +210,18 @@ const MenuPage = () => {
   };
 
   const currentOffer = getCurrentOffer();
+
+  if (showCheckoutPage) {
+    return (
+      <CheckoutPage
+        onBack={() => setShowCheckoutPage(false)}
+        cart={cart}
+        menuItems={menuItems}
+        onUpdateCart={updateCart}
+        onRemoveFromCart={removeFromCartCompletely}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-sheraton-cream to-background">
@@ -624,7 +636,7 @@ const MenuPage = () => {
                     variant="secondary"
                     size="sm"
                     className="bg-white text-sheraton-navy hover:bg-white/90"
-                    onClick={() => setShowCheckout(true)}
+                    onClick={() => setShowCheckoutPage(true)}
                   >
                     Order Now
                   </Button>
@@ -669,15 +681,6 @@ const MenuPage = () => {
         </Card>
       </div>
 
-      {/* Checkout Modal */}
-      <CheckoutModal
-        isOpen={showCheckout}
-        onClose={() => setShowCheckout(false)}
-        cart={cart}
-        menuItems={menuItems}
-        onUpdateCart={updateCart}
-        onRemoveFromCart={removeFromCartCompletely}
-      />
     </div>
   );
 };
