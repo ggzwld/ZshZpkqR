@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from "react";
-import { flushSync } from "react-dom";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -41,10 +40,7 @@ import {
   X,
   ShoppingCart,
 } from "lucide-react";
-import {
-  loadFlutterwaveCheckout,
-  FlutterwaveCheckoutInstance,
-} from "../../lib/flutterwave";
+import type { FlutterwaveHostedSession } from "../../lib/flutterwave";
 import { supabase } from "../../lib/supabase";
 
 interface MenuItem {
@@ -102,41 +98,13 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
   const [estimatedTime, setEstimatedTime] = useState("25-30 minutes");
   const [orderNumber, setOrderNumber] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
-  const [isGatewayOpen, setIsGatewayOpen] = useState(false);
-  const gatewayRef = useRef<FlutterwaveCheckoutInstance | null>(null);
   const isMountedRef = useRef(true);
-
-  const closeGateway = () => {
-    const gateway = gatewayRef.current;
-    gatewayRef.current = null;
-    gateway?.close();
-    if (isMountedRef.current) setIsGatewayOpen(false);
-  };
 
   useEffect(() => {
     return () => {
       isMountedRef.current = false;
-      const gateway = gatewayRef.current;
-      gatewayRef.current = null;
-      gateway?.close();
     };
   }, []);
-
-  useEffect(() => {
-    if (!isGatewayOpen) return;
-
-    const root = document.documentElement;
-    const previousRootOverflow = root.style.overflow;
-    const previousBodyOverflow = document.body.style.overflow;
-
-    root.style.overflow = "hidden";
-    document.body.style.overflow = "hidden";
-
-    return () => {
-      root.style.overflow = previousRootOverflow;
-      document.body.style.overflow = previousBodyOverflow;
-    };
-  }, [isGatewayOpen]);
 
   useEffect(() => {
     const loadProfile = async () => {
@@ -219,11 +187,11 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
     setTipPercentage(percentage);
   };
 
-  const startOnlinePayment = async (order: { id: string; orderNumber: string }) => {
+  const startOnlinePayment = async ({ id }: { id: string }) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) throw new Error("Please sign in before paying.");
 
-    const sessionResponse = await fetch("/api/payments/flutterwave/inline-session", {
+    const sessionResponse = await fetch("/api/payments/flutterwave/hosted-session", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${session.access_token}`,
@@ -231,78 +199,12 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
       },
       body: JSON.stringify({ orderId: order.id }),
     });
-    const paymentSession = await sessionResponse.json();
-    if (!sessionResponse.ok) throw new Error(paymentSession.error || "Unable to prepare secure checkout.");
-
-    await loadFlutterwaveCheckout();
-    if (!window.FlutterwaveCheckout) throw new Error("Secure checkout is unavailable.");
-
-    flushSync(() => setIsGatewayOpen(true));
-    try {
-      await new Promise<void>((resolve, reject) => {
-        let completed = false;
-
-        const finish = (error?: Error) => {
-          if (completed) return;
-          completed = true;
-          if (error) reject(error);
-          else resolve();
-        };
-
-        gatewayRef.current = window.FlutterwaveCheckout!({
-          public_key: paymentSession.publicKey,
-          tx_ref: paymentSession.txRef,
-          amount: paymentSession.amount,
-          currency: paymentSession.currency,
-          payment_options: paymentSession.paymentOptions,
-          customer: {
-            email: paymentSession.customer.email,
-            name: paymentSession.customer.name,
-            phone_number: paymentSession.customer.phoneNumber,
-          },
-          meta: { order_id: paymentSession.orderId },
-          customizations: {
-            title: "Sheraton Special",
-            description: `Order ${paymentSession.txRef}`,
-          },
-          callback: async (payment) => {
-            try {
-              const verificationResponse = await fetch("/api/payments/flutterwave/verify", {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${session.access_token}`,
-                  "content-type": "application/json",
-                },
-                body: JSON.stringify({
-                  transactionId: payment.transaction_id,
-                  txRef: payment.tx_ref,
-                }),
-              });
-              const verification = await verificationResponse.json();
-              if (!verificationResponse.ok || verification.paymentStatus !== "paid") {
-                throw new Error(verification.error || "Payment was not completed.");
-              }
-
-              if (isMountedRef.current) {
-                setOrderNumber(verification.orderNumber);
-                setOrderConfirmed(true);
-                setPendingPaymentOrder(null);
-                setStep("confirmation");
-              }
-              finish();
-            } catch (error) {
-              finish(error instanceof Error ? error : new Error("We could not verify your payment."));
-            }
-          },
-          onclose: () => {
-            gatewayRef.current = null;
-            finish(new Error("Payment was not completed. You can try again when ready."));
-          },
-        });
-      });
-    } finally {
-      closeGateway();
+    const paymentSession = (await sessionResponse.json()) as FlutterwaveHostedSession | { error?: string };
+    if (!sessionResponse.ok || !("paymentUrl" in paymentSession)) {
+      throw new Error(("error" in paymentSession && paymentSession.error) || "Unable to prepare secure checkout.");
     }
+
+    window.location.assign(paymentSession.paymentUrl);
   };
 
   const handlePlaceOrder = async () => {
@@ -771,7 +673,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
             Secure card checkout
           </div>
           <p className="mt-2 text-sm text-gray-600">
-            A secure checkout opens over this page. Your card details go directly to Flutterwave and are never handled by Sheraton Special.
+            You’ll continue to Flutterwave’s secure payment page. Your card details go directly to Flutterwave and are never handled by Sheraton Special.
           </p>
         </div>
       )}
@@ -793,7 +695,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
       {paymentMethod === "mobile-money" && (
         <div className="rounded-lg bg-purple-50 p-4">
           <p className="text-sm text-purple-700">
-            A secure checkout opens over this page to approve Mobile Money using the phone number in your order details.
+            You’ll continue to Flutterwave’s secure payment page to approve Mobile Money using the phone number in your order details.
           </p>
         </div>
       )}
@@ -957,7 +859,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
                 <span>Complete Your Order</span>
               </h1>
               <p className="mt-1 text-sm text-muted-foreground">
-                Review your order, then complete payment securely without leaving this page.
+                Review your order, then complete payment securely in one clear checkout flow.
               </p>
             </div>
             <Button
