@@ -1,55 +1,62 @@
-export interface FlutterwavePayment {
-  transaction_id: number | string;
-  tx_ref: string;
-  status: string;
+export interface FlutterwaveHostedSession {
+  paymentUrl: string;
+  txRef: string;
+  orderId: string;
 }
 
-interface FlutterwaveCheckoutOptions {
-  public_key: string;
-  tx_ref: string;
-  amount: number;
-  currency: string;
-  payment_options: string;
-  customer: {
-    email: string;
-    name?: string;
-    phone_number?: string;
-  };
-  meta?: Record<string, string>;
-  customizations: {
-    title: string;
-    description: string;
-  };
-  callback: (payment: FlutterwavePayment) => void;
-  onclose: (incomplete: boolean) => void;
+export interface PendingCheckoutContext {
+  orderId: string;
+  orderNumber: string;
+  cart: Record<string, number>;
+  orderType: "delivery" | "take-away" | "dine-in" | "room-service";
+  paymentMethod: "card" | "room-charge" | "cash" | "mobile-money";
+  tipAmount: number;
+  tipPercentage: number;
+  usePoints: boolean;
 }
 
-interface FlutterwaveCheckoutInstance {
-  close: () => void;
+export interface ResumableMenuOrder {
+  orderId: string;
+  orderNumber: string;
+  cart: Record<string, number>;
+  orderType: PendingCheckoutContext["orderType"];
+  paymentMethod: Extract<PendingCheckoutContext["paymentMethod"], "card" | "mobile-money">;
+  tipAmount: number;
+  tipPercentage: number;
+  usePoints: boolean;
 }
 
-declare global {
-  interface Window {
-    FlutterwaveCheckout?: (
-      options: FlutterwaveCheckoutOptions,
-    ) => FlutterwaveCheckoutInstance;
+const pendingCheckoutKey = "sheraton.pending-checkout";
+
+export const savePendingCheckout = (context: PendingCheckoutContext) => {
+  sessionStorage.setItem(pendingCheckoutKey, JSON.stringify(context));
+};
+
+export const getPendingCheckout = (): PendingCheckoutContext | null => {
+  const storedContext = sessionStorage.getItem(pendingCheckoutKey);
+  if (!storedContext) return null;
+
+  try {
+    const context = JSON.parse(storedContext) as Partial<PendingCheckoutContext>;
+    if (
+      typeof context.orderId !== "string" ||
+      typeof context.orderNumber !== "string" ||
+      !context.cart ||
+      typeof context.cart !== "object" ||
+      !context.orderType ||
+      !context.paymentMethod ||
+      typeof context.tipAmount !== "number" ||
+      typeof context.tipPercentage !== "number" ||
+      typeof context.usePoints !== "boolean"
+    ) {
+      return null;
+    }
+    return context as PendingCheckoutContext;
+  } catch {
+    return null;
   }
-}
+};
 
-let checkoutScript: Promise<void> | undefined;
-
-export const loadFlutterwaveCheckout = () => {
-  if (window.FlutterwaveCheckout) return Promise.resolve();
-  if (checkoutScript) return checkoutScript;
-
-  checkoutScript = new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "https://checkout.flutterwave.com/v3.js";
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Unable to load secure checkout."));
-    document.head.appendChild(script);
-  });
-
-  return checkoutScript;
+export const clearPendingCheckout = () => {
+  sessionStorage.removeItem(pendingCheckoutKey);
 };

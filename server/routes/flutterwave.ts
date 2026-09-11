@@ -1,6 +1,18 @@
-import type { RequestHandler } from "express";
+import type { Request, RequestHandler } from "express";
 
 const flutterwaveBaseUrl = "https://api.flutterwave.com/v3";
+const flutterwaveReturnPath = "/checkout/flutterwave-return";
+
+const getFlutterwaveReturnUrl = (req: Request) => {
+  const configuredReturnUrl = process.env.FLUTTERWAVE_RETURN_URL;
+  if (configuredReturnUrl) return configuredReturnUrl;
+
+  if (process.env.NODE_ENV !== "production") {
+    return process.env.FLUTTERWAVE_LOCAL_RETURN_URL || `${req.protocol}://${req.get("host")}${flutterwaveReturnPath}`;
+  }
+
+  throw new Error("Flutterwave return URL is not configured");
+};
 
 type MenuOrder = {
   id: string;
@@ -28,7 +40,6 @@ type FlutterwaveTransaction = {
 
 const getConfiguration = () => {
   const secretKey = process.env.FLUTTERWAVE_SECRET_KEY;
-  const publicKey = process.env.VITE_FLUTTERWAVE_PUBLIC_KEY;
   const secretHash = process.env.FLUTTERWAVE_SECRET_HASH;
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
@@ -37,7 +48,6 @@ const getConfiguration = () => {
 
   if (
     !secretKey ||
-    !publicKey ||
     !secretHash ||
     !supabaseUrl ||
     !supabaseAnonKey ||
@@ -48,7 +58,6 @@ const getConfiguration = () => {
 
   return {
     secretKey,
-    publicKey,
     secretHash,
     supabaseUrl,
     supabaseAnonKey,
@@ -147,7 +156,7 @@ const confirmPayment = async (
   order: MenuOrder,
 ) => {
   const metadataOrderId = transaction.meta?.order_id;
-  if (typeof metadataOrderId === "string" && metadataOrderId !== order.id) {
+  if (metadataOrderId !== order.id) {
     throw new Error("Payment metadata does not match the order");
   }
 
@@ -175,7 +184,7 @@ const confirmPayment = async (
   return { order, paymentStatus: "paid" as const };
 };
 
-export const createFlutterwaveInlineSession: RequestHandler = async (req, res) => {
+export const createFlutterwaveHostedSession: RequestHandler = async (req, res) => {
   try {
     const { orderId } = req.body as { orderId?: string };
     if (!orderId) return res.status(400).json({ error: "Order ID is required" });
@@ -185,7 +194,7 @@ export const createFlutterwaveInlineSession: RequestHandler = async (req, res) =
       return res.status(409).json({ error: "This order has already been paid" });
     }
 
-    const { publicKey, defaultCurrency } = getConfiguration();
+    const { defaultCurrency, secretKey } = getConfiguration();
     const currency = String(order.currency || defaultCurrency).toUpperCase();
     const amount = Number(order.total_amount);
     if (!Number.isFinite(amount) || amount <= 0) {
@@ -194,26 +203,51 @@ export const createFlutterwaveInlineSession: RequestHandler = async (req, res) =
 
     const txRef = `sheraton-${order.order_number}-${crypto.randomUUID()}`;
     const paymentOptions = getPaymentOptions(order.payment_method, currency);
+    const returnUrl = getFlutterwaveReturnUrl(req);
+    const response = await fetch(`${flutterwaveBaseUrl}/payments`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        tx_ref: txRef,
+        amount,
+        currency,
+        payment_options: paymentOptions,
+        redirect_url: returnUrl,
+        customer: {
+          email: order.email,
+          name: `${order.first_name} ${order.last_name}`.trim(),
+          phonenumber: order.phone,
+        },
+        meta: { order_id: order.id },
+        customizations: {
+          title: "Sheraton Special",
+          description: `Order ${order.order_number}`,
+        },
+      }),
+    });
+    const payload = (await response.json()) as {
+      status?: string;
+      data?: { link?: string };
+    };
+    if (!response.ok || payload.status !== "success" || !payload.data?.link) {
+      throw new Error("Unable to create secure payment page");
+    }
+
     await updateOrderAsService(order.id, {
       payment_reference: txRef,
       payment_status: "pending",
     });
 
     return res.json({
-      publicKey,
+      paymentUrl: payload.data.link,
       txRef,
       orderId: order.id,
-      amount,
-      currency,
-      paymentOptions,
-      customer: {
-        email: order.email,
-        name: `${order.first_name} ${order.last_name}`.trim(),
-        phoneNumber: order.phone,
-      },
     });
   } catch (error) {
-    console.error("Flutterwave Inline session error", error);
+    console.error("Flutterwave hosted session error", error);
     return res.status(400).json({
       error: error instanceof Error ? error.message : "Unable to prepare payment",
     });

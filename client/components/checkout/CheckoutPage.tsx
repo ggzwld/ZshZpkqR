@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
@@ -40,7 +40,13 @@ import {
   X,
   ShoppingCart,
 } from "lucide-react";
-import { loadFlutterwaveCheckout } from "../../lib/flutterwave";
+import {
+  clearPendingCheckout,
+  getPendingCheckout,
+  savePendingCheckout,
+  type FlutterwaveHostedSession,
+  type ResumableMenuOrder,
+} from "../../lib/flutterwave";
 import { supabase } from "../../lib/supabase";
 
 interface MenuItem {
@@ -52,22 +58,22 @@ interface MenuItem {
   cookTime: string;
 }
 
-interface CheckoutModalProps {
-  isOpen: boolean;
-  onClose: () => void;
+interface CheckoutPageProps {
+  onBack: () => void;
   cart: { [key: string]: number };
   menuItems: MenuItem[];
   onUpdateCart: (itemId: string, quantity: number) => void;
   onRemoveFromCart: (itemId: string) => void;
+  resumableOrder?: ResumableMenuOrder;
 }
 
-const CheckoutModal: React.FC<CheckoutModalProps> = ({
-  isOpen,
-  onClose,
+const CheckoutPage: React.FC<CheckoutPageProps> = ({
+  onBack,
   cart,
   menuItems,
   onUpdateCart,
   onRemoveFromCart,
+  resumableOrder,
 }) => {
   const [step, setStep] = useState<
     "cart" | "details" | "payment" | "confirmation"
@@ -96,26 +102,36 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [tipAmount, setTipAmount] = useState<number>(0);
   const [tipPercentage, setTipPercentage] = useState<number>(18);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
   const [orderConfirmed, setOrderConfirmed] = useState(false);
   const [estimatedTime, setEstimatedTime] = useState("25-30 minutes");
   const [orderNumber, setOrderNumber] = useState("");
   const [checkoutError, setCheckoutError] = useState("");
-  const [isGatewayOpen, setIsGatewayOpen] = useState(false);
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
-    if (!isOpen) return;
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
     return () => {
-      document.body.style.overflow = previousOverflow;
+      isMountedRef.current = false;
     };
-  }, [isOpen]);
+  }, []);
 
   useEffect(() => {
-    if (!isOpen) return;
+    const pendingCheckout = resumableOrder || getPendingCheckout();
+    if (!pendingCheckout) return;
 
+    setPendingPaymentOrder({
+      id: pendingCheckout.orderId,
+      orderNumber: pendingCheckout.orderNumber,
+    });
+    setOrderType(pendingCheckout.orderType);
+    setPaymentMethod(pendingCheckout.paymentMethod);
+    setTipAmount(pendingCheckout.tipAmount);
+    setTipPercentage(pendingCheckout.tipPercentage);
+    setUsePoints(pendingCheckout.usePoints);
+    setStep("payment");
+  }, [resumableOrder]);
+
+  useEffect(() => {
     const loadProfile = async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -137,7 +153,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     };
 
     loadProfile().catch((error) => console.error("Unable to load checkout profile", error));
-  }, [isOpen]);
+  }, []);
 
   const getCartItems = () => {
     return Object.entries(cart).map(([itemId, quantity]) => {
@@ -196,89 +212,36 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     setTipPercentage(percentage);
   };
 
-  const startOnlinePayment = async (order: { id: string; orderNumber: string }) => {
+  const startOnlinePayment = async ({ id, orderNumber }: { id: string; orderNumber: string }) => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) throw new Error("Please sign in before paying.");
 
-    const sessionResponse = await fetch("/api/payments/flutterwave/inline-session", {
+    const sessionResponse = await fetch("/api/payments/flutterwave/hosted-session", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${session.access_token}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ orderId: order.id }),
+      body: JSON.stringify({ orderId: id }),
     });
-    const paymentSession = await sessionResponse.json();
-    if (!sessionResponse.ok) throw new Error(paymentSession.error || "Unable to prepare secure checkout.");
-
-    await loadFlutterwaveCheckout();
-    if (!window.FlutterwaveCheckout) throw new Error("Secure checkout is unavailable.");
-
-    setIsGatewayOpen(true);
-    try {
-      await new Promise<void>((resolve, reject) => {
-        let completed = false;
-      let checkout: { close: () => void } | undefined;
-
-      const finish = (error?: Error) => {
-        if (completed) return;
-        completed = true;
-        if (error) reject(error);
-        else resolve();
-      };
-
-      checkout = window.FlutterwaveCheckout({
-        public_key: paymentSession.publicKey,
-        tx_ref: paymentSession.txRef,
-        amount: paymentSession.amount,
-        currency: paymentSession.currency,
-        payment_options: paymentSession.paymentOptions,
-        customer: {
-          email: paymentSession.customer.email,
-          name: paymentSession.customer.name,
-          phone_number: paymentSession.customer.phoneNumber,
-        },
-        meta: { order_id: paymentSession.orderId },
-        customizations: {
-          title: "Sheraton Special",
-          description: `Order ${paymentSession.txRef}`,
-        },
-        callback: async (payment) => {
-          try {
-            const verificationResponse = await fetch("/api/payments/flutterwave/verify", {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${session.access_token}`,
-                "content-type": "application/json",
-              },
-              body: JSON.stringify({
-                transactionId: payment.transaction_id,
-                txRef: payment.tx_ref,
-              }),
-            });
-            const verification = await verificationResponse.json();
-            if (!verificationResponse.ok || verification.paymentStatus !== "paid") {
-              throw new Error(verification.error || "Payment was not completed.");
-            }
-
-            setOrderNumber(verification.orderNumber);
-            setOrderConfirmed(true);
-            setPendingPaymentOrder(null);
-            setStep("confirmation");
-            finish();
-            checkout?.close();
-          } catch (error) {
-            finish(error instanceof Error ? error : new Error("We could not verify your payment."));
-          }
-        },
-        onclose: () => {
-          finish(new Error("Payment was not completed. You can try again when ready."));
-        },
-        });
-      });
-    } finally {
-      setIsGatewayOpen(false);
+    const paymentSession = (await sessionResponse.json()) as FlutterwaveHostedSession | { error?: string };
+    if (!sessionResponse.ok || !("paymentUrl" in paymentSession)) {
+      throw new Error(("error" in paymentSession && paymentSession.error) || "Unable to prepare secure checkout.");
     }
+
+    savePendingCheckout({
+      orderId: id,
+      orderNumber,
+      cart,
+      orderType,
+      paymentMethod,
+      tipAmount,
+      tipPercentage,
+      usePoints,
+    });
+    setIsRedirecting(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+    window.location.replace(paymentSession.paymentUrl);
   };
 
   const handlePlaceOrder = async () => {
@@ -354,13 +317,17 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       setStep("confirmation");
     } catch (error) {
       console.error("Unable to process menu order", error);
-      setCheckoutError(error instanceof Error ? error.message : "We could not process your order.");
+      if (isMountedRef.current) {
+        setIsProcessing(false);
+        setIsRedirecting(false);
+        setCheckoutError(error instanceof Error ? error.message : "We could not process your order.");
+      }
     } finally {
-      setIsProcessing(false);
+      if (isMountedRef.current) setIsProcessing(false);
     }
   };
 
-  const resetModal = () => {
+  const resetCheckout = () => {
     setStep("cart");
     setOrderType("dine-in");
     setPaymentMethod("card");
@@ -376,16 +343,28 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       specialRequests: "",
     });
     setPendingPaymentOrder(null);
+    setIsRedirecting(false);
+    clearPendingCheckout();
     setUsePoints(false);
     setTipAmount(0);
     setTipPercentage(18);
     setCheckoutError("");
   };
 
-  const handleClose = () => {
-    resetModal();
-    onClose();
+  const handleBack = () => {
+    resetCheckout();
+    onBack();
   };
+
+  const renderRedirectingStep = () => (
+    <div className="flex min-h-[420px] flex-col items-center justify-center rounded-xl border bg-white px-6 text-center shadow-sm">
+      <div className="h-10 w-10 animate-spin rounded-full border-4 border-sheraton-gold/30 border-t-sheraton-gold" aria-hidden="true" />
+      <h2 className="mt-6 text-2xl font-semibold text-sheraton-navy">Opening secure payment</h2>
+      <p className="mt-2 max-w-md text-sm text-muted-foreground">
+        You’re being taken to Flutterwave’s secure checkout. Please keep this tab open while the payment page loads.
+      </p>
+    </div>
+  );
 
   const renderCartStep = () => (
     <div className="space-y-6">
@@ -407,7 +386,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
         </div>
       </div>
 
-      <div className="space-y-4 max-h-64 overflow-y-auto">
+      <div className="space-y-4">
         {getCartItems().map(({ item, quantity }) => {
           if (!item) return null;
           return (
@@ -481,7 +460,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       </div>
 
       <div className="flex space-x-3">
-        <Button variant="outline" onClick={handleClose} className="flex-1">
+        <Button variant="outline" onClick={handleBack} className="flex-1">
           Continue Shopping
         </Button>
         <Button
@@ -745,7 +724,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
             Secure card checkout
           </div>
           <p className="mt-2 text-sm text-gray-600">
-            A secure checkout opens over this page. Your card details go directly to Flutterwave and are never handled by Sheraton Special.
+            You’ll continue to Flutterwave’s secure payment page. Your card details go directly to Flutterwave and are never handled by Sheraton Special.
           </p>
         </div>
       )}
@@ -767,7 +746,7 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       {paymentMethod === "mobile-money" && (
         <div className="rounded-lg bg-purple-50 p-4">
           <p className="text-sm text-purple-700">
-            A secure checkout opens over this page to approve Mobile Money using the phone number in your order details.
+            You’ll continue to Flutterwave’s secure payment page to approve Mobile Money using the phone number in your order details.
           </p>
         </div>
       )}
@@ -907,11 +886,11 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
       </div>
 
       <div className="flex space-x-3">
-        <Button variant="outline" onClick={handleClose} className="flex-1">
+        <Button variant="outline" onClick={handleBack} className="flex-1">
           Order More
         </Button>
         <Button
-          onClick={handleClose}
+          onClick={handleBack}
           className="flex-1 bg-sheraton-gold hover:bg-sheraton-gold/90 text-sheraton-navy"
         >
           Done
@@ -920,33 +899,34 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
     </div>
   );
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 z-[60] bg-background">
-      <main aria-labelledby="checkout-title" className={`h-full p-4 sm:p-6 ${isGatewayOpen ? "overflow-hidden" : "overflow-y-auto"}`}>
+    <div className="w-full bg-background">
+      <main aria-labelledby="checkout-title" className="container py-8 sm:py-10">
         <div className="mx-auto max-w-3xl">
-          <header className="relative pr-10">
-            <h1 id="checkout-title" className="flex items-center space-x-2 text-lg font-semibold">
-              <Crown className="h-5 w-5 text-sheraton-gold" />
-              <span>Complete Your Order</span>
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              Review your order, then complete payment securely without leaving this page.
-            </p>
-            <button
+          <header className="mb-6 flex items-start justify-between gap-4 border-b pb-6">
+            <div>
+              <h1 id="checkout-title" className="flex items-center space-x-2 text-lg font-semibold">
+                <Crown className="h-5 w-5 text-sheraton-gold" />
+                <span>Complete Your Order</span>
+              </h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Review your order, then complete payment securely in one clear checkout flow.
+              </p>
+            </div>
+            <Button
               type="button"
-              onClick={handleClose}
+              variant="outline"
+              onClick={handleBack}
               disabled={isProcessing}
-              aria-label="Close checkout"
-              className="absolute right-0 top-0 rounded-sm p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+              className="shrink-0"
             >
-              <X className="h-4 w-4" />
-            </button>
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Back to Menu
+            </Button>
           </header>
 
           {/* Step Indicator */}
-        <div className="flex items-center justify-center space-x-4 mb-6">
+        <div className="mb-6 flex flex-wrap items-center justify-center gap-x-4 gap-y-2">
           {[
             { id: "cart", label: "Cart", icon: ShoppingCart },
             { id: "details", label: "Details", icon: User },
@@ -994,14 +974,18 @@ const CheckoutModal: React.FC<CheckoutModalProps> = ({
         </div>
 
         {/* Content */}
-        {step === "cart" && renderCartStep()}
-        {step === "details" && renderDetailsStep()}
-          {step === "payment" && renderPaymentStep()}
-          {step === "confirmation" && renderConfirmationStep()}
+        {isRedirecting ? renderRedirectingStep() : (
+          <>
+            {step === "cart" && renderCartStep()}
+            {step === "details" && renderDetailsStep()}
+            {step === "payment" && renderPaymentStep()}
+            {step === "confirmation" && renderConfirmationStep()}
+          </>
+        )}
         </div>
       </main>
     </div>
   );
 };
 
-export default CheckoutModal;
+export default CheckoutPage;

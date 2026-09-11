@@ -15,6 +15,7 @@ import {
 import ServicesProfilePage from "./pages/ServicesProfilePage";
 import BookingPage from "./pages/BookingPage";
 import MenuPage from "./pages/MenuPage";
+import FlutterwaveReturnPage from "./pages/FlutterwaveReturnPage";
 import MenuManagementPage from "./pages/MenuManagementPage";
 // ProfilePage disabled - see DISABLED_FEATURES.md
 import StaffPortalPage from "./pages/StaffPortalPage";
@@ -133,6 +134,7 @@ function App() {
               <Route path="/" element={<RoleAwareHomePage />} />
               <Route path="/book" element={<BookingPage />} />
               <Route path="/menu" element={<MenuPage />} />
+              <Route path="/checkout/flutterwave-return" element={<FlutterwaveReturnPage />} />
               <Route path="/staff/menu" element={<MenuManagementPage />} />
               <Route path="/profile" element={<ServicesProfilePage />} />
               <Route path="/staff" element={<StaffPortalPage />} />

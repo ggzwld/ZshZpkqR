@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "../components/ui/button";
-import CheckoutModal from "../components/checkout/CheckoutModal";
+import CheckoutPage from "../components/checkout/CheckoutPage";
 import { menuItemFromDatabaseRow, MenuItem } from "../lib/menuData";
 import { supabase } from "../lib/supabase";
+import { getPendingCheckout, type ResumableMenuOrder } from "../lib/flutterwave";
 import {
   Card,
   CardContent,
@@ -64,11 +65,73 @@ const MenuPage = () => {
   const [cart, setCart] = useState<{ [key: string]: number }>({});
   const [currentTime, setCurrentTime] = useState(new Date());
   const [activeTab, setActiveTab] = useState("food");
-  const [showCheckout, setShowCheckout] = useState(false);
+  const [showCheckoutPage, setShowCheckoutPage] = useState(false);
+  const [resumableOrder, setResumableOrder] = useState<ResumableMenuOrder | undefined>();
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const pendingCheckout = getPendingCheckout();
+    if (!pendingCheckout) return;
+    setCart(pendingCheckout.cart);
+    setShowCheckoutPage(true);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const restoreUnpaidOrder = async () => {
+      if (getPendingCheckout()) return;
+
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: order } = await supabase
+        .from("menu_orders")
+        .select("id, order_number, order_type, payment_method, tip_amount, points_discount")
+        .eq("user_id", user.id)
+        .eq("status", "pending")
+        .eq("payment_status", "pending")
+        .in("payment_method", ["card", "mobile-money"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!order || !active) return;
+
+      const { data: orderItems } = await supabase
+        .from("menu_order_items")
+        .select("menu_item_id, quantity")
+        .eq("order_id", order.id);
+
+      if (!orderItems?.length || !active) return;
+
+      const restoredCart = Object.fromEntries(
+        orderItems.map((item) => [item.menu_item_id, Number(item.quantity)]),
+      );
+      const restoredOrder: ResumableMenuOrder = {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        cart: restoredCart,
+        orderType: order.order_type,
+        paymentMethod: order.payment_method,
+        tipAmount: Number(order.tip_amount || 0),
+        tipPercentage: 0,
+        usePoints: Number(order.points_discount || 0) > 0,
+      };
+
+      setCart(restoredCart);
+      setResumableOrder(restoredOrder);
+      setShowCheckoutPage(true);
+    };
+
+    restoreUnpaidOrder().catch((error) => console.error("Unable to restore unpaid menu order", error));
+    return () => {
+      active = false;
+    };
   }, []);
 
   const categories = [
@@ -210,6 +273,19 @@ const MenuPage = () => {
   };
 
   const currentOffer = getCurrentOffer();
+
+  if (showCheckoutPage) {
+    return (
+      <CheckoutPage
+        onBack={() => setShowCheckoutPage(false)}
+        cart={cart}
+        menuItems={menuItems}
+        onUpdateCart={updateCart}
+        onRemoveFromCart={removeFromCartCompletely}
+        resumableOrder={resumableOrder}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-sheraton-cream to-background">
@@ -624,7 +700,7 @@ const MenuPage = () => {
                     variant="secondary"
                     size="sm"
                     className="bg-white text-sheraton-navy hover:bg-white/90"
-                    onClick={() => setShowCheckout(true)}
+                    onClick={() => setShowCheckoutPage(true)}
                   >
                     Order Now
                   </Button>
@@ -669,15 +745,6 @@ const MenuPage = () => {
         </Card>
       </div>
 
-      {/* Checkout Modal */}
-      <CheckoutModal
-        isOpen={showCheckout}
-        onClose={() => setShowCheckout(false)}
-        cart={cart}
-        menuItems={menuItems}
-        onUpdateCart={updateCart}
-        onRemoveFromCart={removeFromCartCompletely}
-      />
     </div>
   );
 };
