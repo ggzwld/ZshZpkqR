@@ -15,6 +15,17 @@ export interface PendingCheckoutContext {
   usePoints: boolean;
 }
 
+export interface ResumableMenuOrder {
+  orderId: string;
+  orderNumber: string;
+  cart: Record<string, number>;
+  orderType: PendingCheckoutContext["orderType"];
+  paymentMethod: Extract<PendingCheckoutContext["paymentMethod"], "card" | "mobile-money">;
+  tipAmount: number;
+  tipPercentage: number;
+  usePoints: boolean;
+}
+
 const pendingCheckoutKey = "sheraton.pending-checkout";
 
 export const savePendingCheckout = (context: PendingCheckoutContext) => {

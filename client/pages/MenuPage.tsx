@@ -4,7 +4,7 @@ import { Button } from "../components/ui/button";
 import CheckoutPage from "../components/checkout/CheckoutPage";
 import { menuItemFromDatabaseRow, MenuItem } from "../lib/menuData";
 import { supabase } from "../lib/supabase";
-import { getPendingCheckout } from "../lib/flutterwave";
+import { getPendingCheckout, type ResumableMenuOrder } from "../lib/flutterwave";
 import {
   Card,
   CardContent,
@@ -66,6 +66,7 @@ const MenuPage = () => {
   const [currentTime, setCurrentTime] = useState(new Date());
   const [activeTab, setActiveTab] = useState("food");
   const [showCheckoutPage, setShowCheckoutPage] = useState(false);
+  const [resumableOrder, setResumableOrder] = useState<ResumableMenuOrder | undefined>();
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -77,6 +78,60 @@ const MenuPage = () => {
     if (!pendingCheckout) return;
     setCart(pendingCheckout.cart);
     setShowCheckoutPage(true);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const restoreUnpaidOrder = async () => {
+      if (getPendingCheckout()) return;
+
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: order } = await supabase
+        .from("menu_orders")
+        .select("id, order_number, order_type, payment_method, tip_amount, points_discount")
+        .eq("user_id", user.id)
+        .eq("status", "pending")
+        .eq("payment_status", "pending")
+        .in("payment_method", ["card", "mobile-money"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!order || !active) return;
+
+      const { data: orderItems } = await supabase
+        .from("menu_order_items")
+        .select("menu_item_id, quantity")
+        .eq("order_id", order.id);
+
+      if (!orderItems?.length || !active) return;
+
+      const restoredCart = Object.fromEntries(
+        orderItems.map((item) => [item.menu_item_id, Number(item.quantity)]),
+      );
+      const restoredOrder: ResumableMenuOrder = {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        cart: restoredCart,
+        orderType: order.order_type,
+        paymentMethod: order.payment_method,
+        tipAmount: Number(order.tip_amount || 0),
+        tipPercentage: 0,
+        usePoints: Number(order.points_discount || 0) > 0,
+      };
+
+      setCart(restoredCart);
+      setResumableOrder(restoredOrder);
+      setShowCheckoutPage(true);
+    };
+
+    restoreUnpaidOrder().catch((error) => console.error("Unable to restore unpaid menu order", error));
+    return () => {
+      active = false;
+    };
   }, []);
 
   const categories = [
@@ -227,6 +282,7 @@ const MenuPage = () => {
         menuItems={menuItems}
         onUpdateCart={updateCart}
         onRemoveFromCart={removeFromCartCompletely}
+        resumableOrder={resumableOrder}
       />
     );
   }

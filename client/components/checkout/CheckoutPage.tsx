@@ -45,6 +45,7 @@ import {
   getPendingCheckout,
   savePendingCheckout,
   type FlutterwaveHostedSession,
+  type ResumableMenuOrder,
 } from "../../lib/flutterwave";
 import { supabase } from "../../lib/supabase";
 
@@ -63,6 +64,7 @@ interface CheckoutPageProps {
   menuItems: MenuItem[];
   onUpdateCart: (itemId: string, quantity: number) => void;
   onRemoveFromCart: (itemId: string) => void;
+  resumableOrder?: ResumableMenuOrder;
 }
 
 const CheckoutPage: React.FC<CheckoutPageProps> = ({
@@ -71,6 +73,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
   menuItems,
   onUpdateCart,
   onRemoveFromCart,
+  resumableOrder,
 }) => {
   const [step, setStep] = useState<
     "cart" | "details" | "payment" | "confirmation"
@@ -113,20 +116,20 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({
   }, []);
 
   useEffect(() => {
-    const pendingCheckout = getPendingCheckout();
-    if (pendingCheckout) {
-      setPendingPaymentOrder({
-        id: pendingCheckout.orderId,
-        orderNumber: pendingCheckout.orderNumber,
-      });
-      setOrderType(pendingCheckout.orderType);
-      setPaymentMethod(pendingCheckout.paymentMethod);
-      setTipAmount(pendingCheckout.tipAmount);
-      setTipPercentage(pendingCheckout.tipPercentage);
-      setUsePoints(pendingCheckout.usePoints);
-      setStep("payment");
-    }
-  }, []);
+    const pendingCheckout = resumableOrder || getPendingCheckout();
+    if (!pendingCheckout) return;
+
+    setPendingPaymentOrder({
+      id: pendingCheckout.orderId,
+      orderNumber: pendingCheckout.orderNumber,
+    });
+    setOrderType(pendingCheckout.orderType);
+    setPaymentMethod(pendingCheckout.paymentMethod);
+    setTipAmount(pendingCheckout.tipAmount);
+    setTipPercentage(pendingCheckout.tipPercentage);
+    setUsePoints(pendingCheckout.usePoints);
+    setStep("payment");
+  }, [resumableOrder]);
 
   useEffect(() => {
     const loadProfile = async () => {
